@@ -95,10 +95,14 @@ echo "[26/28] char unlock + simulated recharge - default basic only / lock tag /
 "$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeCharUnlock.gd 2>&1 | grep -q "RESULT=PASS"; pass $?
 
 echo "[27/28] weapon evolution 2nd form - table / shots / pierce / gold / lifesteal / rate / aoe splash + dedup"
-"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeWeaponEvolution2.gd 2>&1 | grep -q "RESULT=PASS"; pass $?
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][28]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeWeaponEvolution2.gd > "$P/_g27_last.txt" 2>&1
+pass $?
 
 echo "[28/28] new enemies batch - templates / pools / charger / splitter / bomber / support / BossPUA"
-"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeNewEnemies.gd 2>&1 | grep -q "RESULT=PASS"; pass $?
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeNewEnemies.gd > "$P/_g28_last.txt" 2>&1
+pass $?
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部门禁 PASS"; else echo "有门禁未通过"; fi

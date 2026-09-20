@@ -101,11 +101,12 @@ func set_data(p: Player, wave_num: int, wave_timer: float, max_wave: int) -> voi
 	else:
 		_wave_label.text = "第 %d / %d 波     剩余 %d 秒" % [wave_num, max_wave, maxi(0, ceili(wave_timer))]
 	_info_label.text = "等级 %d      金币 %d" % [p.level, p.gold]
-	# 武器精通进度：取了第一层才开始显示；满 6 层进化后隐藏（进化瞬间另有全屏播报）
+	# 武器精通进度：进化前常显（0/6 也显示，做路标）；满 6 层进化后隐藏（另有全屏播报）
 	if _mastery_label != null:
-		if p.weapon_level > 0 and not p.weapon_evolved:
-			_mastery_label.text = "武器精通 %d / %d（选满进化武器）" % [
-				p.weapon_level, GameStats.WEAPON_EVOLVE_LEVEL]
+		if not p.weapon_evolved:
+			_mastery_label.text = "武器精通 %d / %d · 每层攻击 +%d，满层进化" % [
+				p.weapon_level, GameStats.WEAPON_EVOLVE_LEVEL,
+				int(GameStats.WEAPON_MASTERY_STACK_ATK)]
 			_mastery_label.visible = true
 		else:
 			_mastery_label.visible = false

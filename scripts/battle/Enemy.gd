@@ -49,6 +49,9 @@ signal sfx_requested(name: String, volume_db: float, pitch: float)
 ## 班长（support）光环脉冲：每 2s 发一次提速（heal=false）、每 4s 发一次治疗（heal=true）。
 ## 范围过滤与目标选择在 Battle 侧做 —— Enemy 不持有 enemies 数组。
 signal support_pulse(pos: Vector2, heal: bool)
+## 台词气泡（2026-09-20）：放招/事件喊话。位置由发射方算好（头顶偏移），
+## 文案来自 GameStats.ENEMY_TAUNTS；入场台词由 Battle 的可视检测直接驱动（不经本信号）。
+signal line_requested(pos: Vector2, text: String)
 
 # ---- Boss 特殊技能状态机（2026-09-19 批次三）----
 ## 状态：chase（慢速追击，攒冷却）→ windup（前摇：站住 + 视觉预警）→
@@ -88,6 +91,12 @@ var _support_heal_t := 0.0
 ## 多来源取 max 不叠加，到期回 1.0。
 var temp_speed_mul := 1.0
 var _temp_speed_t := 0.0
+## 台词状态（2026-09-20）：taunt_done = 入场气泡已放过（每只一次）；
+## died_exploded = 班味炸弹【自爆】死亡（不算被击杀，压制击杀台词）；
+## _monitor_line_done = 班长首次光环喊话已放过（防 2s 一句刷屏）。
+var taunt_done := false
+var died_exploded := false
+var _monitor_line_done := false
 
 ## 逐帧动画速度。[PLACEHOLDER] 未 playtest。
 const IDLE_FPS := 6.0
@@ -144,6 +153,9 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	_support_heal_t = GameStats.SUPPORT_HEAL_INTERVAL
 	temp_speed_mul = 1.0
 	_temp_speed_t = 0.0
+	taunt_done = false
+	died_exploded = false
+	_monitor_line_done = false
 	# 远程怪射击计时器
 	_fire_timer = GameStats.RANGED_FIRE_INTERVAL * randf_range(0.6, 1.0)
 	position = pos
@@ -302,6 +314,10 @@ func _start_windup(to_target: Vector2, d: float) -> void:
 	boss_windup_left = _boss_windup_total
 	if boss_skill_name == "charge":
 		boss_charge_dir = to_target / maxf(d, 0.001)
+	# 放招喊话（2026-09-20）：头顶冒出台词气泡（表无登记则静默）
+	var line := GameStats.enemy_skill_taunt(type_name, boss_skill_name)
+	if line != "":
+		line_requested.emit(global_position + Vector2(0.0, -radius * 2.6), line)
 	queue_redraw()
 
 
@@ -372,6 +388,9 @@ func _charger_brain(delta: float, to_target: Vector2, d: float) -> void:
 				_charger_t = GameStats.CHARGER_WINDUP_TIME
 				# 方向在进入前摇的瞬间锁定 —— 玩家有一整个前摇的时间躲
 				_charger_dir = to_target / maxf(d, 0.001)
+				var line := GameStats.enemy_skill_taunt(type_name, "windup")
+				if line != "":
+					line_requested.emit(global_position + Vector2(0.0, -radius * 2.6), line)
 		"windup":
 			_charger_t = maxf(0.0, _charger_t - delta)
 			if _use_sprite:
@@ -415,6 +434,9 @@ func _bomber_brain(delta: float, to_target: Vector2, d: float) -> void:
 				bomber_state = "fuse"
 				_bomber_t = GameStats.BOMBER_FUSE_TIME
 				sfx_requested.emit("bomber_fuse", -8.0, 1.0)
+				var line := GameStats.enemy_skill_taunt(type_name, "fuse")
+				if line != "":
+					line_requested.emit(global_position + Vector2(0.0, -radius * 2.6), line)
 		"fuse":
 			_bomber_t = maxf(0.0, _bomber_t - delta)
 			if d > GameStats.BOMBER_CANCEL_DIST:
@@ -433,6 +455,7 @@ func _bomber_brain(delta: float, to_target: Vector2, d: float) -> void:
 						and target.global_position.distance_to(global_position) <= GameStats.BOMBER_AOE_DIST:
 					target.take_hit(dmg)   # 玩家死亡由 Player.died 信号走既有失败结算
 				sfx_requested.emit("kill", -6.0, 0.7)
+				died_exploded = true   # 自爆不算被击杀：压制击杀台词「……没炸成」
 				is_dead = true
 
 
@@ -451,6 +474,12 @@ func _support_brain(delta: float, to_target: Vector2, d: float) -> void:
 	if _support_pulse_t <= 0.0:
 		_support_pulse_t = GameStats.SUPPORT_PULSE_INTERVAL
 		support_pulse.emit(global_position, false)
+		# 首次提速喊一句（每只一次，防 2s 一句刷屏）
+		if not _monitor_line_done:
+			_monitor_line_done = true
+			var line := GameStats.enemy_skill_taunt(type_name, "pulse")
+			if line != "":
+				line_requested.emit(global_position + Vector2(0.0, -radius * 2.6), line)
 	_support_heal_t = maxf(0.0, _support_heal_t - delta)
 	if _support_heal_t <= 0.0:
 		_support_heal_t = GameStats.SUPPORT_HEAL_INTERVAL

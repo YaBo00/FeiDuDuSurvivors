@@ -181,6 +181,8 @@ func spawn_enemy(type_name: String, pos: Vector2, hp_mul := 1.0, enforce_spawn_d
 	e.support_pulse.connect(_b._on_support_pulse)
 	e.global_speed_aura.connect(_b._on_global_speed_aura)
 	e.sfx_requested.connect(_b._on_sfx_requested)
+	# 台词气泡（放招/事件喊话；入场台词由 Battle 可视检测直接驱动，不经此信号）
+	e.line_requested.connect(_b._on_enemy_line)
 	if e.global_position.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST \
 			and enforce_spawn_dist:
 		e.global_position = reserve_pos_around_player()

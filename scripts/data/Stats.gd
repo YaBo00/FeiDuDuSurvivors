@@ -312,7 +312,7 @@ const ITEM_DEFS := {
 		"effect": {"harvest": 1.00}},
 	# 武器精通手册（2026-09-20 可达性升级）：进化第三途径（升级卡 / 波末保底之外，金色购买）。
 	# 满层（6）后 shop_roll 不再上架（见其 mastery_level 参数）。
-	"weapon_mastery_book": {"name": "武器精通手册", "rarity": "epic", "desc": "武器精通 +1（满 6 层武器进化）",
+	"weapon_mastery_book": {"name": "武器精通手册", "rarity": "epic", "desc": "武器精通 +1（每层攻击 +3，满 6 层进化）",
 		"effect": {"weapon_mastery": 1.0}},
 }
 
@@ -551,6 +551,9 @@ const CONTACT_DMG_CAP_MULT := 3.0
 ## [PLACEHOLDER] 数值未 playtest；进化后的第二形态（质变招式）是后续迭代。
 const WEAPON_EVOLVE_LEVEL := 6
 const WEAPON_EVOLVE_DMG_MUL := 1.25
+## 武器精通每层的即时小额收益（2026-09-20 用户需求）：叠层期间不至于白板，
+## 但必须低于最普通的攻击卡（+5/8/12）—— 进化的核心收益仍是满层的质变。
+const WEAPON_MASTERY_STACK_ATK := 3.0
 
 ## 武器进化·第二形态（2026-09-20）：满 WEAPON_EVOLVE_LEVEL 层进化后，武器获得
 ## 【形态专属质变】—— 每把武器一个主题方向的附加特性，与既有机制叠加。
@@ -915,6 +918,37 @@ const SUPPORT_WANDER_MAX := 350.0
 ## BossPUA 召唤冷却（复用 boss 技能循环时对齐接入说明 §3.5 的「每 8s」语义——
 ## 实际节奏由 BOSS_SKILL_INTERVAL 决定，此处仅作文档锚点）
 
+# ---- 敌人台词表（2026-09-20 用户需求）：入场气泡 / 击杀告别 / 放招喊话 ----
+## spawn = 首次进入玩家视野时冒泡（每只一次）；death = 被击杀时；skill = 放招喊话
+## （键 = boss 三招名，或行为事件 windup/fuse/pulse）。**缺键 = 不说话** ——
+## Slime/Medium/Rat/Student 刻意不登记：杂鱼满场刷台词会把气泡变成噪音。
+## 用户点名：牛马 spawn「牛来~」death「妈--妈--」。
+const ENEMY_TAUNTS := {
+	"Elite": {"spawn": "就这就这？", "death": "我不甘心！"},
+	"Ranged": {"spawn": "你瞅啥？", "death": "告辞！"},
+	"Boss": {"spawn": "本王回来了！", "death": "呱……王座没了……",
+		"skill": {"fan": "万箭齐发！", "charge": "冲鸭——！！", "summon": "孩子们，上！"}},
+	"BossPUA": {"spawn": "欢迎入职~", "death": "这届员工不行……",
+		"skill": {"fan": "都听我说！", "charge": "绩效冲刺！！", "summon": "都是自己人！"}},
+	"Ox": {"spawn": "牛来~", "death": "妈--妈--"},
+	"Charger": {"spawn": "卷王来卷了", "skill": {"windup": "卷起来！！"}, "death": "卷不动了……"},
+	"Bomber": {"spawn": "班味要炸了", "skill": {"fuse": "班味爆炸！！"}, "death": "……没炸成"},
+	"Splitter": {"spawn": "我精神状态很好", "death": "啊啊啊裂开了！！"},
+	"Monitor": {"spawn": "大家加油鸭~", "skill": {"pulse": "都动起来！"}, "death": "后排也要挨打……"},
+	"Slacker": {"spawn": "摸鱼中勿扰", "death": "鱼没了……"},
+}
+
+## 入场/击杀台词查询。缺键返回空串（调用方空串即静默）。
+static func enemy_taunt(type_name: String, kind: String) -> String:
+	var t: Dictionary = ENEMY_TAUNTS.get(type_name, {})
+	return String(t.get(kind, ""))
+
+## 放招台词查询（boss 三招名或行为事件键）。
+static func enemy_skill_taunt(type_name: String, skill: String) -> String:
+	var t: Dictionary = ENEMY_TAUNTS.get(type_name, {})
+	var s: Dictionary = t.get("skill", {})
+	return String(s.get(skill, ""))
+
 # ============================================================ 升级选项池（H5 UPGRADE_POOL + 拾取范围）
 
 ## tiers = [波<10 的值, 波 10~19 的值, 波>=20 的值]
@@ -937,8 +971,9 @@ const UPGRADE_POOL := [
 	{"id": "pickupRange", "name": "拾取范围", "tiers": [18.0, 26.0, 36.0], "pct": false, "cost_tier": 1},
 	{"id": "proj", "name": "弹道数", "tiers": [1.0, 1.0, 1.0], "pct": false, "cost_tier": 3},
 	# 武器精通（B2 迭代·本期切片）：可重复取 6 次，满层武器进化（伤害 ×1.25）。
-	# 借用 C2 的 max/stat 封顶过滤：满层后自动从升级池消失。
-	{"id": "weapon_mastery", "name": "武器精通", "tiers": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+	# 2026-09-20：每层附赠即时攻击 +3（WEAPON_MASTERY_STACK_ATK，tiers 仅作卡面展示），
+	# 叠层期间不再白板；借用 C2 的 max/stat 封顶过滤：满层后自动从升级池消失。
+	{"id": "weapon_mastery", "name": "武器精通", "tiers": [3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
 		"pct": false, "cost_tier": 3, "max": 6.0, "stat": "weapon_level"},
 ]
 

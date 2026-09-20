@@ -119,12 +119,14 @@ echo [26/28] char unlock + simulated recharge - default basic only / lock tag / 
 if errorlevel 1 (echo   FAIL & set FAIL=1) else (echo   ok)
 
 echo [27/28] weapon evolution 2nd form - table / shots / pierce / gold / lifesteal / rate / aoe splash + dedup
-"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeWeaponEvolution2.gd | findstr /C:"RESULT=PASS" >nul
-if errorlevel 1 (echo   FAIL & set FAIL=1) else (echo   ok)
+rem 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 findstr 误报（同 [9][28]）
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeWeaponEvolution2.gd > "%P%\_g27_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL ^（详见 _g27_last.txt^） & set FAIL=1) else (echo   ok)
 
 echo [28/28] new enemies batch - templates / pools / charger / splitter / bomber / support / BossPUA
-"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeNewEnemies.gd | findstr /C:"RESULT=PASS" >nul
-if errorlevel 1 (echo   FAIL & set FAIL=1) else (echo   ok)
+rem 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 findstr 误报（同 [9]）
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeNewEnemies.gd > "%P%\_g28_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL ^（详见 _g28_last.txt^） & set FAIL=1) else (echo   ok)
 
 echo.
 if %FAIL%==0 (echo ALL GATES PASS) else (echo SOME GATES FAILED)

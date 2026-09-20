@@ -127,6 +127,8 @@ var _floor_theme: Dictionary = {}
 var _themes_seen: Array[String] = []
 ## 本局出现过的敌人类型（自检观测：接入说明 §6 要求每类新敌人至少刷出一只）
 var enemy_types_seen: Dictionary = {}
+## 已放过的台词气泡数（探针断言用；也是台词功能的自证计数）
+var taunt_lines_shown: int = 0
 
 ## hit-stop 防重入
 var _hitstop := false
@@ -303,6 +305,7 @@ func start_run() -> void:
 	_game_time = 0.0
 	_upgrade_queue.clear()
 	enemy_types_seen.clear()
+	taunt_lines_shown = 0
 	get_tree().paused = false
 	# 倍速每局重置回 1.0x（引擎默认值）—— 上一局的 1.5x/2.0x 不允许带进新局
 	speed_mul = 1.0
@@ -524,6 +527,7 @@ func _tick_fighting(delta: float) -> void:
 	wave.live_max = maxi(wave.live_max, enemies.size())
 	combat.space_and_separate()
 	feedback.update_floats(delta)
+	_tick_enemy_taunts()
 	# 记录脚本每帧成本的峰值（毫秒）
 	var phys := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
 	var proc := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
@@ -589,6 +593,30 @@ func _on_enemy_fired(pos: Vector2, dir: float, dmg: int) -> void:
 ## 自检观测：记录出现过的敌人类型（由 WaveDirector.spawn_enemy 调用）。
 func note_enemy_type(t: String) -> void:
 	enemy_types_seen[t] = true
+
+
+## 入场台词（2026-09-20 用户需求）：敌人首次进入玩家视野时头顶冒泡，每只一次。
+## 每帧只算一次可视矩形；已说过的用 bool 短路 —— 满场 140 只也只是一次布尔遍历。
+## 表里没登记的杂鱼（Slime/Rat 等）查表得空串，直接标 done 不冒泡，防刷屏。
+func _tick_enemy_taunts() -> void:
+	var vr := visible_world_rect()
+	for e in enemies:
+		if e.taunt_done or e.is_dead:
+			continue
+		if not vr.has_point(e.global_position):
+			continue
+		e.taunt_done = true
+		var line := GameStats.enemy_taunt(String(e.type_name), "spawn")
+		if line != "":
+			taunt_lines_shown += 1
+			feedback.spawn_float(e.global_position + Vector2(0.0, -e.radius * 2.6),
+				line, Color(0.95, 0.95, 1.0), false)
+
+
+## 台词气泡（放招/事件喊话）：位置由发射方按头顶偏移算好，这里只管播。
+func _on_enemy_line(pos: Vector2, text: String) -> void:
+	taunt_lines_shown += 1
+	feedback.spawn_float(pos, text, Color(1.0, 0.9, 0.55), true)
 
 
 func _on_boss_summon(pos: Vector2, type_name: String, count: int) -> void:
@@ -721,6 +749,15 @@ func _generate_options() -> void:
 					pick[randi() % pick.size()] = mastery
 				elif _current_reason == "level" and randf() < 0.34:
 					pick[randi() % pick.size()] = mastery
+	# 武器精通卡携带进化进度（2026-09-20 用户需求：选卡时看得见叠了几层）。
+	# 等级路径的 opt 是 const 表引用 → 必须 duplicate 后再挂键。
+	for i in pick.size():
+		var o: Dictionary = pick[i]
+		if String(o.get("id", "")) != "weapon_mastery":
+			continue
+		o = o.duplicate()
+		o["mastery_progress"] = int(player.weapon_level)
+		pick[i] = o
 	_current_options = pick
 
 
