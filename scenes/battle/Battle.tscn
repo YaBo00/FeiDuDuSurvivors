@@ -1,0 +1,47 @@
+[gd_scene load_steps=9 format=3]
+
+[ext_resource type="Script" path="res://scripts/battle/Battle.gd" id="1_battle"]
+[ext_resource type="PackedScene" path="res://scenes/entities/Player.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://scenes/ui/Hud.tscn" id="3_hud"]
+[ext_resource type="PackedScene" path="res://scenes/ui/UpgradePanel.tscn" id="4_upgrade"]
+[ext_resource type="PackedScene" path="res://scenes/ui/ResultPanel.tscn" id="5_result"]
+[ext_resource type="PackedScene" path="res://scenes/ui/ShopPanel.tscn" id="6_shop"]
+[ext_resource type="PackedScene" path="res://scenes/ui/PauseMenu.tscn" id="7_pause"]
+[ext_resource type="Script" path="res://scripts/ui/TouchControls.gd" id="8_touch"]
+
+[node name="Battle" type="Node2D"]
+script = ExtResource("1_battle")
+
+[node name="BackgroundLayer" type="CanvasLayer" parent="."]
+layer = -1
+
+[node name="Background" type="ColorRect" parent="BackgroundLayer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.106, 0.102, 0.133, 1)
+
+[node name="World" type="Node2D" parent="."]
+
+[node name="Player" parent="World" instance=ExtResource("2_player")]
+position = Vector2(640, 360)
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position = Vector2(640, 360)
+
+[node name="Hud" parent="." instance=ExtResource("3_hud")]
+
+[node name="UpgradePanel" parent="." instance=ExtResource("4_upgrade")]
+
+[node name="ResultPanel" parent="." instance=ExtResource("5_result")]
+
+[node name="ShopPanel" parent="." instance=ExtResource("6_shop")]
+
+[node name="PauseMenu" parent="." instance=ExtResource("7_pause")]
+
+[node name="TouchControls" type="CanvasLayer" parent="."]
+layer = 10
+script = ExtResource("8_touch")
