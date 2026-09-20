@@ -1,5 +1,19 @@
 # 肥嘟嘟幸存者（Godot 版）
 
+> ## 🎮 如何下载可玩版（看这里，30 秒开玩）
+>
+> **①** 点本页面右侧 **Releases**（或直接访问
+> https://github.com/YaBo00/FeiDuDuSurvivors/releases ）
+> **②** 在最新版本（v0.2.0）下方展开 **Assets**
+> **③** 下载 **`FeiDuDuSurvivors_win64.zip`**
+> **④** 解压 → 双击 **`FeiDuDuSurvivors.exe`** 即玩（exe 与 pck 必须保持同目录）
+>
+> ⚠️ **不要点左上角绿色的 `<> Code` 按钮** —— 那是**源码包，不是游戏**！
+> 源码包没有打包好的 exe，直接跑 `tools/run_game.cmd` 会黑屏（那是开发机专用脚本，
+> 依赖本机 Godot 环境）。下载可玩版只走 Releases。
+
+---
+
 类《吸血鬼幸存者 / 土豆兄弟》的移动端割草 Roguelike。
 走位 + 自动攻击，20 波 + 波末升级 / 商店 + Boss（规划中）。
 
