@@ -83,7 +83,10 @@ func start_next_wave() -> void:
 		if boss_pos.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST * 2.0:
 			boss_pos = reserve_pos_around_player()
 		# Boss 按波选型（2026-09-20 新敌人批次）：第 10 波 = BossPUA，第 20 波/无尽 = 袋鼠王 Boss
-		spawn_enemy(GameStats.boss_type_for_wave(_b.wave_num), boss_pos)
+		# Boss 血量动态化（2026-09-20 需求 §2.2）：替换写死的模板 600/800 ——
+		# 血量 = 同波普通怪平均模板血 × 27 × 难度 boss_hp_mul，随波次曲线自然成长。
+		spawn_enemy(GameStats.boss_type_for_wave(_b.wave_num), boss_pos,
+			GameStats.boss_wave_hp_mul(_b.wave_num))
 		banner_sub += "  ·  BOSS 来袭"
 	wave_started.emit(_b.wave_num, banner_sub)
 	_b.hud.set_data(_b.player, _b.wave_num, _b.wave_timer, GameStats.WAVE_COUNT)
@@ -183,6 +186,8 @@ func spawn_enemy(type_name: String, pos: Vector2, hp_mul := 1.0, enforce_spawn_d
 	e.sfx_requested.connect(_b._on_sfx_requested)
 	# 台词气泡（放招/事件喊话；入场台词由 Battle 可视检测直接驱动，不经此信号）
 	e.line_requested.connect(_b._on_enemy_line)
+	# Boss 半血狂暴（2026-09-20）：闪烁由 Enemy 自演，震屏/中央大字交 Battle 转发
+	e.rage_requested.connect(_b._on_boss_rage)
 	if e.global_position.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST \
 			and enforce_spawn_dist:
 		e.global_position = reserve_pos_around_player()

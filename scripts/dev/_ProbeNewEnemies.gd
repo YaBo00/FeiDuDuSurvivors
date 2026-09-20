@@ -281,7 +281,7 @@ func _test_temp_speed() -> void:
 func _test_taunts(p: Node2D) -> void:
 	# 表查询与「杂鱼安静」策略
 	_check(GameStats.enemy_taunt("Ox", "spawn") == "牛来~", "T1: Ox 入场台词 = 牛来~")
-	_check(GameStats.enemy_taunt("Ox", "death") == "妈--妈--", "T2: Ox 死亡台词 = 妈--妈--")
+	_check(GameStats.enemy_taunt("Ox", "death") == "牛来~", "T2: Ox 死亡台词 = 牛来~")
 	_check(GameStats.enemy_taunt("Slime", "spawn") == ""
 		and GameStats.enemy_taunt("Rat", "death") == ""
 		and GameStats.enemy_taunt("Student", "spawn") == "",
@@ -307,9 +307,9 @@ func _test_taunts(p: Node2D) -> void:
 	battle.combat.cleanup_enemies()
 	var found := false
 	for t in lines:
-		if String(t) == "妈--妈--":
+		if String(t) == "牛来~":
 			found = true
-	_check(found, "T8: 击杀牛马冒出「妈--妈--」")
+	_check(found, "T8: 击杀牛马冒出「牛来~」")
 	_cleanup_test_enemies()
 	# 自爆死亡不喊击杀台词（班味炸弹 died_exploded 压制）
 	var b := _make_frozen("Bomber", p.global_position + Vector2(260.0, 0.0))

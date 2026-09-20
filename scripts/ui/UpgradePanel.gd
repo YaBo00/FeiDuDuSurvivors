@@ -18,6 +18,10 @@ var _cost_labels: Array[Label] = []
 
 ## 自动选择的延迟（面板自己的秒数）。与 Battle 旧的 UPGRADE_AUTO_DELAY 等价。
 const AUTO_SELECT_DELAY := 0.3
+## 卡片容量 = 基础张数 + 最大角色天赋加成（学习豪 +1）+ 预知未来额外选项（+1，2026-09-20）。
+## 旧版硬编码 3 张按钮：学习豪的第 4 张卡被静默吞掉（2026-09-20 全库审查 P1）。
+## show_options 本就按「有卡才显示、没卡就藏」工作，多建按钮零副作用。
+const BUTTON_COUNT := GameStats.UPGRADE_OPTIONS + 2
 
 var _options: Array = []
 var _on_choice: Callable = Callable()
@@ -60,63 +64,78 @@ func _ready() -> void:
 	_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root.add_child(_hint)
 
-	var bw := 360.0
-	var bh := 220.0
-	var gap := 40.0
-	var total := bw * 3.0 + gap * 2.0
-	var start_x := (GameStats.VIEW_WIDTH - total) * 0.5
-	for i in 3:
+	# 卡片布局（2026-09-20 修复三连）：
+	#   ① 5 张卡时旧式固定 290px 横排需要 1546px > 视口 1280 ⇒ 溢出屏幕。
+	#      改为按可用宽度自适应 + 超过每行上限就换行（末行单独居中）。
+	#   ② 文字溢出卡片：Label 在容器里的最小宽度会按【整段文本不换行】算
+	#      （中文无空格 ⇒ 整行算一个词），autowrap 形同虚设。改为绝对定位 +
+	#      【固定宽度】的 Label，autowrap 才真正生效（见卡片内部）。
+	const MARGIN := 40.0
+	const MIN_CARD_W := 208.0
+	const MAX_CARD_W := 290.0
+	var gap := 24.0
+	var usable := GameStats.VIEW_WIDTH - MARGIN * 2.0
+	var per_row := clampi(int((usable + gap) / (MIN_CARD_W + gap)), 1, 4)
+	var bw := minf(MAX_CARD_W, (usable - gap * float(per_row - 1)) / float(per_row))
+	var bh := 236.0
+	var row_gap := 18.0
+	# 垂直：按最大容量（BUTTON_COUNT）算总高并整体居中 —— 两行时不会被屏幕底裁掉
+	# （2026-09-20 布局验证抓到：旧 top=248 配两行 ⇒ 下缘 738 > 视口 720）。
+	var area_top := 214.0
+	var area_bottom := GameStats.VIEW_HEIGHT - 12.0
+	var max_rows := int(ceil(float(BUTTON_COUNT) / float(per_row)))
+	var block_h := bh * float(max_rows) + row_gap * float(max_rows - 1)
+	var top := area_top + maxf(0.0, (area_bottom - area_top - block_h) * 0.5)
+	for i in BUTTON_COUNT:
+		var r: int = i / per_row
+		var c: int = i % per_row
+		var in_row: int = mini(per_row, BUTTON_COUNT - r * per_row)
+		var row_total := bw * float(in_row) + gap * float(in_row - 1)
+		var start_x := (GameStats.VIEW_WIDTH - row_total) * 0.5
 		var b := Button.new()
-		b.position = Vector2(start_x + float(i) * (bw + gap), 270.0)
+		b.position = Vector2(start_x + float(c) * (bw + gap), top + float(r) * (bh + row_gap))
 		b.size = Vector2(bw, bh)
-		b.add_theme_font_size_override("font_size", 24)
+		b.clip_contents = true   # 双保险：任何超长文本都被裁在卡内，绝不糊到卡外
+		b.add_theme_font_size_override("font_size", 20)
 		b.pressed.connect(_on_button_pressed.bind(i))
 		_root.add_child(b)
 		_buttons.append(b)
 
-		# 卡片内部：图标 + 文字。Button 自身不放 text，全交给子节点排版。
-		var row := HBoxContainer.new()
-		row.set_anchors_preset(Control.PRESET_FULL_RECT)
-		row.offset_left = 18
-		row.offset_right = -18
-		row.offset_top = 18
-		row.offset_bottom = -18
-		row.alignment = BoxContainer.ALIGNMENT_CENTER
-		row.add_theme_constant_override("separation", 16)
-		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		b.add_child(row)
-
+		# 卡片内部：图标居中在上、文字在下（竖向排布，宽度全给文字换行用）。
+		# 绝对定位 + 固定尺寸 —— 不用容器，避免容器的 min-size 计算破坏 autowrap。
 		var icon := TextureRect.new()
-		icon.custom_minimum_size = Vector2(72, 72)
+		icon.position = Vector2((bw - 64.0) * 0.5, 14.0)
+		icon.size = Vector2(64.0, 64.0)
 		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(icon)
+		b.add_child(icon)
 		_icons.append(icon)
 
+		var pad := 12.0
 		var label := Label.new()
+		label.position = Vector2(pad, 86.0)
+		label.size = Vector2(bw - pad * 2.0, 100.0)   # 固定宽度 ⇒ autowrap 真正生效
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		label.add_theme_font_size_override("font_size", 22)
-		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		label.add_theme_font_size_override("font_size", 20)
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		b.add_child(label)
 
-		# 负面代价行（2026-09-20 用户要求）：正面 buff（名称+效果）在上，负面代价
-		# 独立成行、红色小字垫底 —— 与混排进名字行相比，正负一目了然。
-		var text_box := VBoxContainer.new()
-		text_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		text_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		text_box.add_theme_constant_override("separation", 6)
-		text_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		text_box.add_child(label)
+		# 负面代价行（2026-09-20）：正面 buff 在上，负面代价独立成行、红色小字垫底。
 		var cost := Label.new()
-		cost.add_theme_font_size_override("font_size", 18)
+		cost.position = Vector2(pad, 192.0)
+		cost.size = Vector2(bw - pad * 2.0, 36.0)
+		cost.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		cost.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		cost.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		cost.add_theme_font_size_override("font_size", 16)
 		cost.add_theme_color_override("font_color", Color(1.0, 0.42, 0.36))
 		cost.visible = false
 		cost.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		text_box.add_child(cost)
+		b.add_child(cost)
 
-		row.add_child(text_box)
 		_labels.append(label)
 		_cost_labels.append(cost)
 
@@ -187,12 +206,6 @@ func _on_button_pressed(index: int) -> void:
 # ---------------------------------------------------------------- 自动选择 / 暂停期输入
 var _auto := false
 var _auto_timer := 0.0
-
-
-## 自检/观测模式：显示后自动选第 0 项。由 Battle 在打开面板时调用。
-func set_auto_select(enabled: bool) -> void:
-	_auto = enabled
-	_auto_timer = 0.0
 
 
 func _process(delta: float) -> void:

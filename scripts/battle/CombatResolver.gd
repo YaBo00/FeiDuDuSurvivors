@@ -25,8 +25,6 @@ signal shake_requested()
 signal hitstop_requested()
 ## 玩家死亡（由接触伤害或敌方弹道触发）→ Battle 走失败结算
 signal player_died()
-## 拾取物被收走：(kind, value) → Battle 转交 player.add_gold / gain_xp
-signal pickup_collected(kind: String, value: int)
 
 ## 空间网格：cell -> 敌人引用数组。分离力与弹道碰撞共用（P0-1 / P1-20）。
 var _grid: Dictionary = {}
@@ -117,11 +115,13 @@ func contact_damage() -> void:
 	var sum := 0
 	var worst := 0
 	var touched := false
+	var contacted: Array = []
 	for e in nearby_enemies(_b.player.global_position):
 		if e.is_dead:
 			continue
 		if e.global_position.distance_to(_b.player.global_position) < e.radius + Player.RADIUS:
 			touched = true
+			contacted.append(e)
 			sum += int(e.dmg)
 			worst = maxi(worst, int(e.dmg))
 	if not touched:
@@ -130,6 +130,18 @@ func contact_damage() -> void:
 		sum = mini(sum, worst * GameStats.CONTACT_DMG_CAP_MULT)
 	var r: Dictionary = _b.player.take_hit(sum)
 	var res := String(r["result"])
+	# 反甲（2026-09-20 升级/商店扩充）：真实受击（hit/dead）时按各接触怪【自身伤害】比例反弹。
+	# 闪避 / 无敌帧不触发 —— 没真挨打就没有反伤。击杀入账仍由 cleanup_enemies 统一处理
+	# （这里只调 take_damage，不重复走击杀侧效应）。
+	if _b.player.thorns > 0.0 and (res == "hit" or res == "dead"):
+		for e in contacted:
+			if e.is_dead:
+				continue
+			var back := maxi(1, roundi(float(e.dmg) * _b.player.thorns))
+			e.take_damage(back)
+			e.last_hit_crit = false
+			float_requested.emit(e.global_position + Vector2(0, -e.radius * 0.6),
+				str(back), Color(0.55, 1.0, 0.58), false)
 	# A1：闪避/受击飘字都做节流。站在怪堆里时 60 帧/秒会疯狂触发，
 	# 28 个飘字池瞬间被打满、互相覆盖，什么都看不清。
 	if res == "dodge" and _b._game_time - _last_dodge_float >= FLOAT_THROTTLE:
@@ -295,16 +307,27 @@ func on_player_fired(aim_pos: Vector2, count: int) -> void:
 	# 爆裂薯块（potato 第二形态）：命中溅射的半径与比例（0 = 无溅射）。
 	var aoe_r: float = float(form.get("aoe_radius", 0.0))
 	var aoe_p: float = float(form.get("aoe_pct", 0.0))
-	var visual: Dictionary = AssetDB.weapon_bullet(wid)
+	# 进化态优先用第二形态专属弹道（<wid>_evo）；未配置/贴图缺失回落基础弹（没美术也能跑）。
+	var visual: Dictionary = {}
+	if not form.is_empty():
+		visual = AssetDB.weapon_bullet(wid + "_evo")
+	if visual.is_empty():
+		visual = AssetDB.weapon_bullet(wid)
+	# 多弹道间隔角（2026-09-20 用户需求）：默认每发 PROJ_SPREAD；弹道数多到总扇面触顶
+	# MAX_PROJ_SPREAD 后，扇面不再变宽，改为压缩每条之间的间隔角。
+	# ≤5 条时 MAX_PROJ_SPREAD/(n-1) ≥ PROJ_SPREAD ⇒ step 仍为 PROJ_SPREAD，行为与旧版逐位一致。
+	var step := GameStats.PROJ_SPREAD
+	if shots > 1:
+		step = minf(step, GameStats.MAX_PROJ_SPREAD / float(shots - 1))
 	for i in shots:
 		var off := 0.0
 		if shots > 1:
-			off = (float(i) - float(shots - 1) * 0.5) * GameStats.PROJ_SPREAD
+			off = (float(i) - float(shots - 1) * 0.5) * step
 		var proj: Projectile = _b.PROJECTILE_SCENE.instantiate()
 		_b.world.add_child(proj)
 		proj.setup(player_pos, base_ang + off, dmg,
 			_b.player.crit, _b.player.critd, ls,
-			float(w["speed_mul"]), radius, pierce, gold_hit, aoe_r, aoe_p)
+			float(w["speed_mul"]) * _b.player.proj_speed_mul, radius, pierce, gold_hit, aoe_r, aoe_p)
 		# 武器弹道美术（视觉层）：贴图缺失时 Projectile 内部自动回落图元。
 		# apply_visual 命中时会用贴图 fallback 覆盖 body_color；没有贴图才用武器表色。
 		proj.apply_visual(visual)
@@ -318,10 +341,19 @@ func cleanup_enemies() -> void:
 	var remaining: Array[Enemy] = []
 	for e in _b.enemies:
 		if e.is_dead:
-			_b.kills += 1
+			# 班味炸弹【自爆】不算被击杀（审查 P2）：died_exploded 是 Enemy 在
+			# _bomber_brain 引爆时打的标记 —— 战绩里不该出现「玩家没打它也 +1」。
+			# 金币/经验掉落照常（掉落语义归 cleanup，与击杀计数解耦）。
+			if not e.died_exploded:
+				_b.kills += 1
 			var gv: int = roundi(float(e.gold) * float(_b.player.harvest)) \
 				+ int(_b.player.gold_per_kill)
 			spawn_pickup(Pickup.KIND_GOLD, gv, e.global_position)
+			# 幸运（2026-09-20 扩充）：把死属性接入掉落 —— 按 luck 概率【额外】掉一枚同面额金币。
+			# luck 由「幸运」升级卡提供（10/15/20%）；探针可用 luck=1.0 做确定性断言。
+			if _b.player.luck > 0.0 and randf() < _b.player.luck:
+				spawn_pickup(Pickup.KIND_GOLD, gv,
+					e.global_position + Vector2(randf_range(-12, 12), randf_range(-12, 12)))
 			spawn_pickup(Pickup.KIND_XP, e.xp_value,
 				e.global_position + Vector2(randf_range(-10, 10), randf_range(-10, 10)))
 			# 磁铁掉落（C3 掉落三件套）：精英/Boss 必掉，普通怪小概率 —— 拾取后 8 秒全场磁吸
@@ -368,7 +400,6 @@ func collect(pk: Pickup) -> void:
 	else:
 		_b.player.gain_xp(pk.value)
 		sfx_requested.emit("xp", -12.0, 1.0)
-	pickup_collected.emit(pk.kind, pk.value)
 	pk.queue_free()
 
 

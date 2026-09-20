@@ -54,19 +54,51 @@ func _make_label(x: float, y: float, w: float, h: float, size: int) -> Label:
 	return l
 
 
-## stats 约定字段：victory, waves_completed, kills, level, gold
+## stats 约定字段：victory, waves_completed, kills, level, gold, difficulty（可选）
+##                 endless / endless_best / new_record（可选，2026-09-20 无尽体验 —— 缺省按普通局渲染）
 func show_result(stats: Dictionary) -> void:
 	var victory: bool = stats.get("victory", false)
-	_title.text = "通关！" if victory else "失败"
-	_title.add_theme_color_override("font_color", Color("#FFD700") if victory else Color("#ff4444"))
-	_stats.text = "存活波数：%d\n击杀数：%d\n等级：%d\n金币：%d" % [
-		stats.get("waves_completed", 0),
+	var endless: bool = stats.get("endless", false)
+	if victory:
+		_title.text = "通关！"
+		_title.add_theme_color_override("font_color", Color("#FFD700"))
+	elif endless:
+		_title.text = "无尽终局"
+		_title.add_theme_color_override("font_color", Color("#ff4444"))
+	else:
+		_title.text = "失败"
+		_title.add_theme_color_override("font_color", Color("#ff4444"))
+	# 难度行（2026-09-20 难度系统）：字段缺省时省略 —— 旧调用方/探针零影响
+	var diff_name := String(stats.get("difficulty", ""))
+	var diff_line := "难度：%s\n" % diff_name if diff_name != "" else ""
+	# 无尽行（2026-09-20）：历史最佳常驻；破纪录在标题下加一行高亮提示
+	var endless_line := ""
+	if endless:
+		endless_line = "无尽最佳：%d 波\n" % int(stats.get("endless_best", 0))
+		if bool(stats.get("new_record", false)):
+			endless_line = "新纪录！\n" + endless_line
+	_stats.text = "%s%s%s\n击杀数：%d\n等级：%d\n金币：%d" % [
+		diff_line,
+		endless_line,
+		("抵达波数：%d" if endless else "存活波数：%d") % int(stats.get("waves_completed", 0)),
 		stats.get("kills", 0),
 		stats.get("level", 1),
 		stats.get("gold", 0),
 	]
+	if bool(stats.get("new_record", false)):
+		_title.text += "  ★"
 	visible = true
 
 
 func hide_panel() -> void:
 	visible = false
+
+
+## 结算页 Esc = 退出游戏。提示文案一直写着「按 ESC 退出」，但此前没有任何人接
+## —— 纯死键（2026-09-20 全库审查 P1）。语义与 UpgradePanel 的 Esc 一致。
+## RESULT 状态树未暂停，本节点默认能收 _unhandled_input；visible 守卫防误触。
+func _unhandled_input(event: InputEvent) -> void:
+	if not visible:
+		return
+	if event.is_action_pressed("pause"):
+		get_tree().quit(0)

@@ -74,6 +74,12 @@ var _bonus := {      # 加成累加器（由升级/道具写入）
 	"critd": 0.0, "harvest": 0.0, "luck": 0.0, "proj": 0.0, "pickupRange": 0.0, "all": 0.0,
 	# 攻击距离百分比加成（参数化预留：将来「可调射程」升级/道具往这里加值）
 	"attackRange": 0.0,
+	# ---- 2026-09-20 升级池扩充：新 stat 的累加键（recalc_stats 消费）----
+	"maxHpPct": 0.0,     # 生命上限百分比乘区（强壮）
+	"projSpeed": 0.0,    # 弹道速度百分比
+	"expGain": 0.0,      # 经验获取百分比
+	"thorns": 0.0,       # 反甲比例（受击反弹给来源）
+	"cdr": 0.0,          # 冷却缩减（封顶 MAX_CDR）
 }
 
 # ---------------------------------------------------------------- 派生属性（每帧使用）
@@ -107,6 +113,28 @@ var gold: int = 20
 var gold_per_kill := 0
 ## 商店价格折扣（投资手册；1.0 = 原价）
 var shop_discount := 1.0
+
+# ---- 2026-09-20 扩充新增：护盾 / 反甲 / 弹速 / 拾取倍率 / 额外选项 / 复活币 ----
+## 当前护盾吸收值（受击时先扣盾再扣血）。上限 shield_cap，脱战回充。
+var shield: float = 0.0
+## 护盾上限（能量护盾卡每层叠加 tiers 值）。
+var shield_cap: float = 0.0
+## 护盾层数上限（回充单位 = shield_cap / shield_charges_max；0 = 不回充）。
+var shield_charges_max: int = 0
+## 脱战回充计时（受击清零，静置 SHIELD_REGEN_DELAY 秒回一层）。
+var shield_regen_t: float = 0.0
+## 反甲比例（受击反弹给来源怪；recalc 收口）。
+var thorns: float = 0.0
+## 冷却缩减（主动道具；recalc 收口，封顶 MAX_CDR）。
+var cdr: float = 0.0
+## 弹道速度乘区（1.0 = 原速；recalc 收口）。
+var proj_speed_mul: float = 1.0
+## 拾取范围倍率（临时磁铁 = 2.0，本局永久；recalc 收口）。
+var pickup_mul_run: float = 1.0
+## 待生效的额外升级选项数（预知未来；_generate_options 消费后清零）。
+var extra_card_pending: int = 0
+## 复活币剩余次数（致死时消耗 1 次原地复活）。
+var resurrect_charges: int = 0
 
 # ---------------------------------------------------------------- 运行时
 var invincible_timer: float = 0.0
@@ -234,6 +262,14 @@ func reset(pos: Vector2) -> void:
 	_kanga_stop_t = 0.0
 	# 全场磁吸计时清零（磁铁掉落，参考 C3 掉落三件套）
 	magnet_all_t = 0.0
+	# 2026-09-20 扩充新增字段每局清零（thorns/cdr/proj_speed_mul 由 _bonus 派生，已随上面清零）
+	shield = 0.0
+	shield_cap = 0.0
+	shield_charges_max = 0
+	shield_regen_t = 0.0
+	pickup_mul_run = 1.0
+	extra_card_pending = 0
+	resurrect_charges = 0
 	# 武器进化状态清零（B2 迭代：weapon_mastery 层数与进化标记每局重置）
 	weapon_level = 0
 	weapon_evolved = false
@@ -264,12 +300,17 @@ func recalc_stats() -> void:
 	defense = roundi(float(_base["def"]) * (1.0 + all) + _bonus["def"])
 	spd = roundi(float(_base["spd"]) * GameStats.SPATIAL_SCALE * (1.0 + _bonus["spd"]) * (1.0 + all))
 	aspd = clampf(float(_base["aspd"]) * (1.0 + _bonus["aspd"]) * (1.0 + all), 0.05, GameStats.MAX_ASPD)
-	proj = mini(GameStats.MAX_PROJ, int(_base["proj"]) + int(_bonus["proj"]))
+	proj = maxi(1, int(_base["proj"]) + int(_bonus["proj"]))   # 不设上限（2026-09-20 用户需求）
 	crit = minf(GameStats.MAX_CRIT, float(_base["crit"]) + _bonus["crit"])
-	critd = float(_base["critd"]) + _bonus["critd"]
+	# 暴击伤害封顶（审查 P2）：critd 卡是升级池里唯一没有上限的成长项，
+	# 无限叠会通胀（+0.4/张 × 攻击力基数）。上限取 6.0 = 600%，正常局摸不到顶。
+	critd = minf(GameStats.MAX_CRITD, float(_base["critd"]) + _bonus["critd"])
 	max_hp = roundi(float(_base["maxHp"]) * (1.0 + all) + _bonus["hp"])
 	if m_hp > 0.0:
 		max_hp += int(m_hp)
+	# 强壮（2026-09-20 扩充）：生命上限百分比乘区 —— 刻意乘在平加之后，后期收益更高
+	if _bonus["maxHpPct"] > 0.0:
+		max_hp = roundi(float(max_hp) * (1.0 + _bonus["maxHpPct"]))
 	hp_regen = float(_base["hpRegen"]) + _bonus["hpRegen"]
 	dodge = minf(GameStats.MAX_DODGE, float(_base["dodge"]) + _bonus["dodge"])
 	lifesteal = minf(GameStats.MAX_LIFESTEAL, float(_base["lifesteal"]) + _bonus["lifesteal"])
@@ -279,6 +320,8 @@ func recalc_stats() -> void:
 	pickup_range = maxf(8.0, float(_base["pickupRange"]) + _bonus["pickupRange"])
 	if m_pick > 0.0:
 		pickup_range = maxf(8.0, pickup_range * (1.0 + m_pick))
+	# 临时磁铁（2026-09-20 商店扩充）：本局剩余时间拾取范围 ×2
+	pickup_range *= pickup_mul_run
 	# 攻击间隔 = BASE / aspd / 武器 rate_mul，夹在 [ATTACK_INTERVAL_MIN, 999]。
 	# 下限护栏防止 aspd + 题海精进 + 粉笔连射三者叠加把间隔打到接近 0（见设计文档 D2）。
 	# 第二形态 rate_add（残影连拳等）：加在 rate_mul 上；未进化 form 为空 → 逐位不变。
@@ -289,6 +332,10 @@ func recalc_stats() -> void:
 		GameStats.ATTACK_INTERVAL_MIN, 999.0)
 	# 攻击距离：基础值 ×（1 + 百分比加成），下限 80 防止被负加成废掉
 	attack_range = maxf(80.0, GameStats.ATTACK_RANGE_BASE * (1.0 + _bonus["attackRange"]))
+	# ---- 2026-09-20 升级池扩充：反甲 / 冷却缩减 / 弹速（纯派生收口）----
+	thorns = maxf(0.0, _bonus["thorns"])
+	cdr = clampf(_bonus["cdr"], 0.0, GameStats.MAX_CDR)
+	proj_speed_mul = 1.0 + maxf(0.0, _bonus["projSpeed"])
 	if hp > float(max_hp):
 		hp = float(max_hp)
 	stats_changed.emit()
@@ -303,6 +350,17 @@ func apply_upgrade(id: String, value: float) -> void:
 			_bonus[id] += value
 		"proj":
 			_bonus["proj"] += 1.0
+		# ---- 2026-09-20 升级池扩充：9 项新升级的接线（键映射见注释）----
+		"critDmg":
+			_bonus["critd"] += value          # 与商店「暴击之牙」同键，受 MAX_CRITD 封顶
+		"range":
+			_bonus["attackRange"] += value    # 对齐既有 attackRange 键（HUD 射程即时反映）
+		"projSpeed", "expGain", "thorns", "maxHpPct", "cdr":
+			_bonus[id] += value
+		"lucky":
+			_bonus["luck"] += value           # 键名必须对齐既有 _bonus["luck"]（lucky 只是升级 id）
+		"shield":
+			add_shield(value)                 # 新机制：层数 +1、上限 += value、立即获得等量盾
 		"weapon_mastery":
 			# 武器进化（B2 迭代）：武器精通不走 _bonus 的层数部分（它是层数计数不是属性加成），
 			# 满 WEAPON_EVOLVE_LEVEL 层 → evolved ⇒ 出膛伤害 × WEAPON_EVOLVE_DMG_MUL，
@@ -326,6 +384,11 @@ func apply_upgrade(id: String, value: float) -> void:
 ## ------------------------------------------------------------------ 受击 / 无敌帧
 ## 返回 {result: "dodge"/"iframe"/"hit"/"dead", dmg: int}。
 func take_hit(raw_dmg: int) -> Dictionary:
+	# 已死亡不再结算（审查 P2）：died 只允许 emit 一次 —— 死后同帧的连环
+	# take_hit（接触群伤/自爆/敌弹）只会把 hp 打成负数、重复触发死亡侧效应。
+	# 返回 "iframe"：对调用方就是「这一击没生效」，不会二次触发 player_died。
+	if not is_alive():
+		return {"result": "iframe", "dmg": 0}
 	# 观测模式：不掉血，但仍走无敌帧与闪烁，保持行为一致
 	if god_mode:
 		invincible_timer = GameStats.IFRAME_DURATION
@@ -340,8 +403,14 @@ func take_hit(raw_dmg: int) -> Dictionary:
 	if traits_enabled and trait_id == "armor_stack":
 		eff_def = defense + int(float(_armor_stacks) * GameStats.TRAIT_ARMOR_STEP)
 	var d := GameStats.incoming_damage(raw_dmg, eff_def)
+	# 护盾（2026-09-20 扩充）：先扣盾、盾破才扣血。盾吃满这一击 → 视作受击命中但不掉血。
+	if shield > 0.0:
+		var absorbed := minf(shield, float(d))
+		shield -= absorbed
+		d -= int(absorbed)
 	hp -= float(d)
 	invincible_timer = GameStats.IFRAME_DURATION
+	shield_regen_t = 0.0   # 受击打断护盾回充计时（脱战才回）
 	stats_changed.emit()
 	# 【越挫越勇】真实扣血（"hit" / "dead"）才叠层 —— 闪避 / 无敌帧 / 观测模式命中不算受击。
 	# 层在扣血结算【之后】叠，本击已按旧层计算（见上）。被初心类机制救回时层数保留（挨打就长壳）。
@@ -358,6 +427,14 @@ func take_hit(raw_dmg: int) -> Dictionary:
 			invincible_timer = GameStats.TRAIT_SAVE_IFRAME
 			stats_changed.emit()
 			return {"result": "hit", "dmg": d, "trait": "beginner_save"}
+		# 【复活币】（2026-09-20 商店扩充）：免死机制的第二来源 —— 与「初心」可叠加：
+		# 基础豪先吃天赋、再吃道具；其余角色直接吃复活币。原地复活回 50% 血。
+		if resurrect_charges > 0:
+			resurrect_charges -= 1
+			hp = float(maxi(1, roundi(float(max_hp) * 0.5)))
+			invincible_timer = GameStats.TRAIT_SAVE_IFRAME
+			stats_changed.emit()
+			return {"result": "hit", "dmg": d, "trait": "resurrect"}
 		hp = 0.0
 		died.emit()
 		return {"result": "dead", "dmg": d}
@@ -456,6 +533,21 @@ func apply_item(item_id: String) -> void:
 				# 商店「武器精通手册」（2026-09-20 可达性升级）：与升级卡同一入口，
 				# 层数累计 / 第 6 层进化判定 / 进化播报全在 apply_upgrade 里，不重复实现。
 				apply_upgrade("weapon_mastery", v)
+			# ---- 2026-09-20 商店扩充：7 个新道具的效果键（跨模块键见注释）----
+			"heal_pct":
+				heal(float(max_hp) * v)        # 血包：立即回复 50% 最大生命（走 heal，受上限钳制）
+			"thorns":
+				_bonus["thorns"] += v
+			"shield_flat":
+				add_shield(v, false)           # 一次性护盾：只加当前盾值，不占层数上限
+			"magnet_mul":
+				pickup_mul_run *= v            # 临时磁铁：本局拾取范围倍率（reset 清零）
+			"resurrect":
+				resurrect_charges += int(v)
+			"extra_card":
+				extra_card_pending += int(v)
+			"reroll":
+				pass                           # 跨模块效果：由 Battle 购买回调刷新商店
 			_:
 				_bonus[key] += v
 	recalc_stats()
@@ -470,10 +562,28 @@ func heal(amount: float) -> void:
 	stats_changed.emit()
 
 
+## 加盾（能量护盾卡 / 一次性护盾道具）。层数上限 +1、上限 += value、立即获得等量盾。
+## 一次性道具（charges 不增）走 shield_flat：只加当前盾值，不改上限/层数。
+func add_shield(value: float, add_charge: bool = true) -> void:
+	if value <= 0.0:
+		return
+	if add_charge:
+		shield_cap += value
+		shield_charges_max += 1
+		shield = minf(shield_cap, shield + value)   # 立刻获得一层
+	else:
+		shield += value   # 临时盾可短暂超出上限（吸收完自然回落到 cap 回充轨）
+	stats_changed.emit()
+
+
 func gain_xp(amount: int) -> int:
 	if amount <= 0:
 		return 0
-	xp += amount
+	# 学习能力（2026-09-20 扩充）：经验获取乘区（+15/20/25%），在入账处乘
+	var gain := amount
+	if _bonus["expGain"] > 0.0:
+		gain = maxi(1, roundi(float(amount) * (1.0 + _bonus["expGain"])))
+	xp += gain
 	var gained := 0
 	while xp >= xp_to_next:
 		xp -= xp_to_next
@@ -523,6 +633,15 @@ func _physics_process(delta: float) -> void:
 	# 全场磁吸倒计时（磁铁掉落）：归零后掉落物回到拾取范围驱动的普通磁吸
 	if magnet_all_t > 0.0:
 		magnet_all_t = maxf(0.0, magnet_all_t - delta)
+	# 护盾脱战回充（2026-09-20 扩充）：静置 SHIELD_REGEN_DELAY 秒回一层（层值 = cap/层数）
+	if shield_charges_max > 0 and shield < shield_cap:
+		shield_regen_t += delta
+		if shield_regen_t >= GameStats.SHIELD_REGEN_DELAY:
+			shield_regen_t = 0.0
+			shield = minf(shield_cap, shield + shield_cap / float(shield_charges_max))
+			stats_changed.emit()
+	else:
+		shield_regen_t = 0.0
 
 	var dir := _movement_dir()
 	if dir.length_squared() > 0.0:

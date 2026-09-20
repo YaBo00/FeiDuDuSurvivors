@@ -129,6 +129,18 @@ func _build() -> void:
 	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_name_label)
 
+	# 当前难度提示（2026-09-20 难度系统）：主菜单已选，这里只读展示
+	var diff_label := Label.new()
+	diff_label.text = "难度 · %s" % GameStats.difficulty_name()
+	diff_label.position = Vector2(360, 580)
+	diff_label.size = Vector2(400, 34)
+	diff_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	diff_label.add_theme_font_size_override("font_size", 20)
+	diff_label.add_theme_color_override("font_color",
+		Color("#7CFC8A") if GameStats.difficulty_key() == "normal" else Color("#ff6b6b"))
+	diff_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(diff_label)
+
 	# ---------------- 右：天赋 + 属性 ----------------
 	var right := VBoxContainer.new()
 	right.position = Vector2(800, 96)

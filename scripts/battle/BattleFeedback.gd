@@ -110,6 +110,14 @@ func spawn_burst(pos: Vector2, color: Color, big: bool) -> void:
 			return
 
 
+## 进化达成新星环（2026-09-20 美术回投）：玩家位置金色扩散光环，一次性自毁。
+## EvoNova 内部缺图回落程序扩散环 —— 没美术也能跑。进化是低频事件，不做对象池。
+func play_evolution_nova(pos: Vector2) -> void:
+	var nova := EvoNova.new()
+	add_child(nova)
+	nova.global_position = pos
+
+
 ## 波次开始横幅：淡入 → 停留 → 淡出。
 func show_wave_banner(wave_num: int, theme_name: String) -> void:
 	_wave_banner.text = "第 %d 波 · %s" % [wave_num, theme_name]

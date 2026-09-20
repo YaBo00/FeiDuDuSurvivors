@@ -70,6 +70,14 @@ func _build() -> void:
 		stats.add_theme_font_size_override("font_size", 16)
 		stats.add_theme_color_override("font_color", Color(0.75, 0.78, 0.88))
 		box.add_child(stats)
+		# 无尽最佳（2026-09-20 无尽体验）：跑过无尽局才显示，不打扰纯普通局玩家
+		if int(ledger["best_endless_wave"]) > 0:
+			var inf := Label.new()
+			inf.text = "无尽最佳：%d 波" % int(ledger["best_endless_wave"])
+			inf.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			inf.add_theme_font_size_override("font_size", 16)
+			inf.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
+			box.add_child(inf)
 
 	box.add_child(_spacer(24))
 
@@ -208,15 +216,120 @@ func _make_button(text: String, size: int) -> Button:
 
 
 func _on_start() -> void:
+	_open_difficulty_select()
+
+
+# ---------------------------------------------------------------- 难度选择（2026-09-20）
+## 难度选择遮罩层（非 null = 开着）。点「开始游戏」先选难度，再进选人。
+## 选择写入 GameSession.difficulty（权威数据源），随后走原选人/开局流程。
+var _diff_layer: ColorRect = null
+
+
+func _open_difficulty_select() -> void:
+	if _diff_layer != null:
+		return
+	_diff_layer = ColorRect.new()
+	_diff_layer.color = Color(0, 0, 0, 0.66)
+	_diff_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_diff_layer)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_diff_layer.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
+	sb.border_color = Color(0.42, 0.46, 0.68)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(10)
+	sb.content_margin_left = 34.0
+	sb.content_margin_right = 34.0
+	sb.content_margin_top = 24.0
+	sb.content_margin_bottom = 24.0
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 14)
+	panel.add_child(box)
+
+	var title := Label.new()
+	title.text = "选择模式"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 32)
+	title.add_theme_color_override("font_color", Color("#FFD700"))
+	box.add_child(title)
+
+	# 难度选项：数据来自 GameStats.DIFFICULTIES（改表即生效，这里不硬编码系数）。
+	for key in ["normal", "hard"]:
+		var def: Dictionary = GameStats.DIFFICULTIES[key]
+		var sub := "标准数值体验" if key == "normal" \
+			else "敌人血量 ×%.1f · 伤害 ×%.1f · 数量 ×%.1f · Boss 血量 ×%.0f" % [
+				float(def["hp_mul"]), float(def["dmg_mul"]),
+				float(def["spawn_mul"]), float(def["boss_hp_mul"])]
+		var b := Button.new()
+		b.text = "%s\n%s" % [String(def["name"]), sub]
+		b.custom_minimum_size = Vector2(420, 86)
+		b.add_theme_font_size_override("font_size", 20)
+		b.pressed.connect(_pick_difficulty.bind(String(key)))
+		box.add_child(b)
+
+	# 无尽模式（2026-09-20 无尽体验）：波次不限、曲线持续爬升、跑到阵亡为止。
+	# 数值走普通难度乘区；此前的纪录一并展示。
+	var endless_sub := "波次不限 · 曲线持续爬升 · 跑到阵亡为止"
+	var endless_best := int(MetaSave.ledger()["best_endless_wave"])
+	if endless_best > 0:
+		endless_sub += "（历史最佳 %d 波）" % endless_best
+	var endless_btn := Button.new()
+	endless_btn.text = "无尽模式\n%s" % endless_sub
+	endless_btn.custom_minimum_size = Vector2(420, 86)
+	endless_btn.add_theme_font_size_override("font_size", 20)
+	endless_btn.pressed.connect(_pick_endless)
+	box.add_child(endless_btn)
+
+	var cancel := Button.new()
+	cancel.text = "取消（Esc）"
+	cancel.custom_minimum_size = Vector2(180, 42)
+	cancel.add_theme_font_size_override("font_size", 16)
+	cancel.pressed.connect(_close_difficulty_select)
+	box.add_child(cancel)
+
+
+func _pick_difficulty(key: String) -> void:
+	if not GameStats.DIFFICULTIES.has(key):
+		return
+	GameSession.difficulty = key
+	GameSession.endless = false   # 明确走普通/困难：主菜单路径每局重设，无进程内残留
+	_close_difficulty_select()
 	get_tree().change_scene_to_file(CHARSEL_SCENE)
 
 
-## 键盘/手柄也能进（Enter 或空格）。商店开着时改为关闭商店，杜绝误触开始。
+func _pick_endless() -> void:
+	GameSession.difficulty = "normal"
+	GameSession.endless = true
+	_close_difficulty_select()
+	get_tree().change_scene_to_file(CHARSEL_SCENE)
+
+
+func _close_difficulty_select() -> void:
+	if _diff_layer != null:
+		_diff_layer.queue_free()
+		_diff_layer = null
+
+
+## 键盘/手柄也能进（Enter 或空格）。商店/难度层开着时改为关闭对应弹层，杜绝误触开始。
 func _unhandled_input(event: InputEvent) -> void:
 	if _shop_layer != null:
 		if event.is_action_pressed("use_item") or (event is InputEventKey and event.pressed \
 				and (event.keycode == KEY_ENTER or event.keycode == KEY_ESCAPE)):
 			_close_meta_shop()
+			get_viewport().set_input_as_handled()
+		return
+	if _diff_layer != null:
+		if event.is_action_pressed("pause") or (event is InputEventKey and event.pressed \
+				and event.keycode == KEY_ESCAPE):
+			_close_difficulty_select()
 			get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed("use_item") or (event is InputEventKey and event.pressed and event.keycode == KEY_ENTER):

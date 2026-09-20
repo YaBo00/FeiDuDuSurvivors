@@ -17,7 +17,8 @@ extends RefCounted
 
 const SCHEMA_VERSION := 2
 ## 每局结束后的结算键（写死，防脏数据）
-const KEYS := ["best_wave", "total_kills", "total_gold", "runs", "wins", "meta_xp"]
+## best_endless_wave（2026-09-20）：无尽模式最佳抵达波次 —— 仅 endless 局入账。
+const KEYS := ["best_wave", "best_endless_wave", "total_kills", "total_gold", "runs", "wins", "meta_xp"]
 ## 已解锁角色的持久化键（不属于结算 int 键，单独读写）
 const UNLOCKED_KEY := "unlocked_chars"
 ## 默认解锁：只有基础嘉豪。其余角色走选角界面的「模拟充值」解锁（2026-09-20 用户需求）。
@@ -38,6 +39,19 @@ const META_UPGRADES := [
 static var save_path := "user://meta_save.json"
 
 
+## JSON 脏数据护栏（审查 P2）：ledger 直接把存档值喂给 int() —— int(Array/Dictionary)
+## 会直接脚本报错炸掉账本读取（never crash 纪律）。这里只放行 int/float/数字字符串，
+## 其余（bool/array/dict/null）一律按 0 处理，让坏档安全回落干净账本。
+static func _safe_int(v: Variant) -> int:
+	if v is int:
+		return v
+	if v is float:
+		return int(v)
+	if v is String:
+		return v.to_int()
+	return 0
+
+
 ## 读账本：缺失/损坏 → 返回全 0 的干净账本（并尝试覆盖坏文件）。
 static func ledger() -> Dictionary:
 	var d := _defaults()
@@ -51,12 +65,12 @@ static func ledger() -> Dictionary:
 		_save(d)                     # 坏文件 → 用干净账本覆盖
 		return d
 	for k in KEYS:
-		d[k] = int(parsed.get(k, 0))
+		d[k] = _safe_int(parsed.get(k, 0))
 	var lv = parsed.get("meta_levels", {})
 	if typeof(lv) == TYPE_DICTIONARY:
 		for id in lv:
 			if find_upgrade(String(id)) != null:
-				d["meta_levels"][String(id)] = maxi(0, int(lv[id]))
+				d["meta_levels"][String(id)] = maxi(0, _safe_int(lv[id]))
 	var ul = parsed.get(UNLOCKED_KEY, null)
 	if typeof(ul) == TYPE_ARRAY:
 		for id in ul:
@@ -69,12 +83,16 @@ static func ledger() -> Dictionary:
 ## 结算入账：把一局结果并入账本（含 meta_xp 折算）并落盘。返回更新后的账本。
 ## xp 折算公式（[PLACEHOLDER]）：kills/20 + wave×3 + 通关 +100，向下取整。
 ## 折算放这里是【单入口】决策：所有结算路径自动带 xp，调用方零改动。
-static func record_run(victory: bool, wave: int, kills: int, gold: int) -> Dictionary:
+## endless（2026-09-20）：无尽局传 true —— 只有无尽局才更新 best_endless_wave；
+## 普通局（含默认参数的旧调用方/探针）对该键零影响。
+static func record_run(victory: bool, wave: int, kills: int, gold: int, endless: bool = false) -> Dictionary:
 	var d := ledger()
 	d["runs"] = int(d["runs"]) + 1
 	if victory:
 		d["wins"] = int(d["wins"]) + 1
 	d["best_wave"] = maxi(int(d["best_wave"]), int(wave))
+	if endless:
+		d["best_endless_wave"] = maxi(int(d["best_endless_wave"]), int(wave))
 	d["total_kills"] = int(d["total_kills"]) + maxi(0, int(kills))
 	d["total_gold"] = int(d["total_gold"]) + maxi(0, int(gold))
 	d["meta_xp"] = int(d["meta_xp"]) + xp_earned(victory, int(wave), int(kills))

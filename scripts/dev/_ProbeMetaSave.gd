@@ -3,9 +3,10 @@ extends SceneTree
 ##
 ## 被验证的契约：
 ##   MetaSave.ledger() —— 缺失/损坏一律回落全 0 干净账本
-##   MetaSave.record_run(victory, wave, kills, gold) —— 累计入账并落盘（负值钳 0）
+##   MetaSave.record_run(victory, wave, kills, gold, endless=false) —— 累计入账并落盘（负值钳 0）
 ##   持久化：重开进程语义 = 重新 ledger() 仍读到累积值
 ##   best_wave 只升不降；runs/wins 单调；损坏文件被安全覆盖
+##   best_endless_wave（2026-09-20）：仅 endless 局入账、maxi 语义、普通局零影响
 ##
 ## 隔离：探针把 save_path 重定向到 user://meta_save_probe.json，结束删除，
 ## 不碰真实存档 user://meta_save.json。
@@ -64,6 +65,20 @@ func _initialize() -> void:
 	_check(int(d5["runs"]) == 0, "损坏文件 → 安全回落全 0 干净账本（并覆盖坏文件）")
 	var d6: Dictionary = MetaSave.record_run(true, 5, 10, 20)
 	_check(int(d6["runs"]) == 1 and int(d6["best_wave"]) == 5, "回落后再入账正常")
+
+	# ---- G. 无尽最佳波次（2026-09-20 无尽体验）----
+	_check(int(d6["best_endless_wave"]) == 0, "G0 新账本 best_endless_wave 默认 0")
+	var d7: Dictionary = MetaSave.record_run(false, 12, 40, 60)          # 普通局：endless 缺省 false
+	_check(int(d7["best_endless_wave"]) == 0, "G1 普通局（endless 缺省）不动 best_endless_wave")
+	var d8: Dictionary = MetaSave.record_run(false, 23, 90, 150, true)   # 无尽局抵达 23 波
+	_check(int(d8["best_endless_wave"]) == 23, "G2 无尽局入账 best_endless_wave=23")
+	var d9: Dictionary = MetaSave.record_run(false, 15, 30, 40, true)    # 无尽局只到 15 波
+	_check(int(d9["best_endless_wave"]) == 23, "G3 无尽纪录只升不降（maxi 语义）")
+	var d10: Dictionary = MetaSave.record_run(false, 8, 10, 5)           # 普通局 8 波
+	_check(int(d10["best_endless_wave"]) == 23 and int(d10["best_wave"]) == 23,
+		"G4 普通局 best_wave 照常入账且不污染 best_endless_wave")
+	var d11: Dictionary = MetaSave.ledger()
+	_check(int(d11["best_endless_wave"]) == 23, "G5 best_endless_wave 落盘持久")
 
 	# ---- 清理 ----
 	if FileAccess.file_exists(PROBE_PATH):

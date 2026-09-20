@@ -68,11 +68,17 @@ func _arm() -> void:
 func _tA_regression_guard() -> void:
 	print("[PROBE] --- A. 前 20 波回归护栏（改这些值 = 改了前 20 波难度，必须显式确认）---")
 	_check(_approx(GameStats.hp_scale(1), 1.1), "hp_scale(1) == 1.1（实际 %.4f）" % GameStats.hp_scale(1))
-	_check(_approx(GameStats.hp_scale(20), 3.0), "hp_scale(20) == 3.0（实际 %.4f）" % GameStats.hp_scale(20))
+	# 期望值从常量推导（2026-09-20 调平后不再硬编码：血量斜率改为「波 20 = ×8」、
+	# 数量翻倍 32+10）—— 这样以后每次调平不必再改本探针。
+	_check(_approx(GameStats.hp_scale(20), 1.1 + 19.0 * GameStats.HP_SCALE_SLOPE),
+		"hp_scale(20) == 1.1+19×斜率 = %.4f（实际 %.4f）" % [
+			1.1 + 19.0 * GameStats.HP_SCALE_SLOPE, GameStats.hp_scale(20)])
 	_check(_approx(GameStats.dmg_scale(1), 1.0), "dmg_scale(1) == 1.0（实际 %.4f）" % GameStats.dmg_scale(1))
 	_check(_approx(GameStats.dmg_scale(20), 1.95), "dmg_scale(20) == 1.95（实际 %.4f）" % GameStats.dmg_scale(20))
-	_check(GameStats.spawn_count(1) == 21, "spawn_count(1) == 21（实际 %d）" % GameStats.spawn_count(1))
-	_check(GameStats.spawn_count(20) == 116, "spawn_count(20) == 116（实际 %d）" % GameStats.spawn_count(20))
+	var sc1 := mini(GameStats.SPAWN_BASE + GameStats.SPAWN_GROWTH, GameStats.SPAWN_COUNT_CAP)
+	_check(GameStats.spawn_count(1) == sc1, "spawn_count(1) == %d（实际 %d）" % [sc1, GameStats.spawn_count(1)])
+	var sc20 := mini(GameStats.SPAWN_BASE + 20 * GameStats.SPAWN_GROWTH, GameStats.SPAWN_COUNT_CAP)
+	_check(GameStats.spawn_count(20) == sc20, "spawn_count(20) == %d（实际 %d）" % [sc20, GameStats.spawn_count(20)])
 
 	# 线性段公式：w in 1..WAVE_COUNT 时 spawn_count == SPAWN_BASE + w*SPAWN_GROWTH
 	for w in range(1, GameStats.WAVE_COUNT + 1):

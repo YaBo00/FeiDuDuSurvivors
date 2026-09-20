@@ -143,6 +143,107 @@ func _arm() -> void:
 		"重开后 Slime max_hp %d == 无代价期望 %d（乘区确实回到 1.0）" % [
 			int(clean.max_hp), clean_expected])
 
+	# ---- G. 2026-09-20 升级池扩充：9 新项的登记与端到端效果 ----
+	var pool_now: Array = _consts().get("UPGRADE_POOL", [])
+	var new_ids := ["critDmg", "range", "projSpeed", "expGain", "thorns", "shield",
+		"lucky", "maxHpPct", "cdr"]
+	var found := {}
+	for def in pool_now:
+		found[String(def.get("id", ""))] = def
+	var missing_new := 0
+	var bad_shape := 0
+	for id in new_ids:
+		if not found.has(id):
+			missing_new += 1
+			continue
+		var d: Dictionary = found[id]
+		var tiers: Array = d.get("tiers", [])
+		var ct := int(d.get("cost_tier", 0))
+		if tiers.size() != 3 or ct < 1 or ct > 3:
+			bad_shape += 1
+	_check(missing_new == 0, "G1: 9 个新升级项全部登记（缺 %d）" % missing_new)
+	_check(bad_shape == 0, "G2: 新升级项 tiers 3 段且 cost_tier ∈ 1..3（非法 %d）" % bad_shape)
+
+	var pl2 = battle.player
+	var critd0: float = float(pl2.critd)
+	pl2.apply_upgrade("critDmg", 0.30)
+	_check(_approx(float(pl2.critd) - critd0, 0.30),
+		"G3a: critDmg → critd +0.30（%.3f → %.3f）" % [critd0, float(pl2.critd)])
+	var range0: float = float(pl2.attack_range)
+	pl2.apply_upgrade("range", 0.15)
+	_check(float(pl2.attack_range) > range0,
+		"G3b: range → 射程提升（%.1f → %.1f）" % [range0, float(pl2.attack_range)])
+	pl2.apply_upgrade("projSpeed", 0.20)
+	_check(_approx(float(pl2.proj_speed_mul), 1.20),
+		"G3c: projSpeed → 弹速乘区 1.20（实际 %.3f）" % float(pl2.proj_speed_mul))
+	# 防升级消耗干扰净值：拉高升级门槛后再入账（100 × 1.2 = 120）
+	pl2.xp_to_next = 999999
+	pl2.xp = 0
+	pl2.apply_upgrade("expGain", 0.20)
+	pl2.gain_xp(100)
+	_check(int(pl2.xp) == 120,
+		"G3d: expGain → 100 经验实收 120（实际 %d）" % int(pl2.xp))
+	pl2.apply_upgrade("thorns", 0.25)
+	_check(_approx(float(pl2.thorns), 0.25),
+		"G3e: thorns → 反甲 0.25（实际 %.3f）" % float(pl2.thorns))
+	pl2.apply_upgrade("shield", 15.0)
+	_check(_approx(float(pl2.shield_cap), 15.0) and _approx(float(pl2.shield), 15.0)
+		and int(pl2.shield_charges_max) == 1,
+		"G3f: shield → 上限/当前/层数 = 15/15/1（实际 %.0f/%.0f/%d）" % [
+			float(pl2.shield_cap), float(pl2.shield), int(pl2.shield_charges_max)])
+	pl2.apply_upgrade("lucky", 0.10)
+	_check(_approx(float(pl2.luck), float(pl2._base["luck"]) + 0.10),
+		"G3g: lucky → luck = 基础 +0.10（实际 %.2f）" % float(pl2.luck))
+	var hp0: int = int(pl2.max_hp)
+	pl2.apply_upgrade("maxHpPct", 0.10)
+	_check(int(pl2.max_hp) > hp0, "G3h: maxHpPct → 生命上限提升（%d → %d）" % [hp0, int(pl2.max_hp)])
+	pl2.apply_upgrade("cdr", 0.12)
+	_check(_approx(float(pl2.cdr), 0.12), "G3i: cdr → 冷却缩减 0.12（实际 %.3f）" % float(pl2.cdr))
+	for i in 4:
+		pl2.apply_upgrade("cdr", 0.12)
+	_check(_approx(float(pl2.cdr), 0.40), "G4: cdr 封顶 MAX_CDR=0.40（实际 %.3f）" % float(pl2.cdr))
+
+	# ---- H. 2026-09-20 商店扩充：7 道具的定价与效果键 ----
+	var shop_ids := ["s_refill", "s_reroll", "s_extracard", "s_magnet",
+		"s_thorns_sm", "s_shield_sm", "s_resurrect"]
+	var items: Dictionary = _consts().get("ITEM_DEFS", {})
+	var miss2 := 0
+	var price_ok := 0
+	for id in shop_ids:
+		if not items.has(id):
+			miss2 += 1
+			continue
+		var d2: Dictionary = items[id]
+		if d2.has("price") and int(_consts_call("shop_price", [id, 1.0])) == int(d2["price"]):
+			price_ok += 1
+	_check(miss2 == 0, "H1: 7 个新商店道具全部登记（缺 %d）" % miss2)
+	_check(price_ok == 7, "H2: 7 个新道具都用固定 price（命中 %d/7）" % price_ok)
+	var normal_p: int = int(_consts_call("shop_price", ["s_resurrect", 1.0]))
+	GameSession.difficulty = "hard"
+	var hard_p: int = int(_consts_call("shop_price", ["s_resurrect", 1.0]))
+	GameSession.difficulty = "normal"
+	_check(hard_p == normal_p * 2, "H3: 复活币困难难度价格翻倍（%d → %d）" % [normal_p, hard_p])
+	var known_keys := ["heal_pct", "reroll", "extra_card", "magnet_mul", "thorns",
+		"shield_flat", "resurrect"]
+	var bad_key := 0
+	for id in shop_ids:
+		if not items.has(id):
+			continue
+		for k in (items[id]["effect"] as Dictionary).keys():
+			if not (String(k) in known_keys):
+				bad_key += 1
+	_check(bad_key == 0, "H4: 新道具效果键全在已知分发集合（未知 %d）" % bad_key)
+	pl2.hp = float(pl2.max_hp) * 0.2
+	var hp_low: float = float(pl2.hp)
+	pl2.apply_item("s_refill")
+	_check(float(pl2.hp) > hp_low, "H5a: 血包回血（%.0f → %.0f）" % [hp_low, float(pl2.hp)])
+	pl2.apply_item("s_resurrect")
+	_check(int(pl2.resurrect_charges) == 1, "H5b: 复活币计数 =1（实际 %d）" % int(pl2.resurrect_charges))
+	var sh0: float = float(pl2.shield)
+	pl2.apply_item("s_shield_sm")
+	_check(_approx(float(pl2.shield) - sh0, 30.0),
+		"H5c: 一次性护盾 +30（实际 +%.0f）" % (float(pl2.shield) - sh0))
+
 	_finish("")
 
 
