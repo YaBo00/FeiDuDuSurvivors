@@ -314,6 +314,23 @@ const ITEM_DEFS := {
 	# 满层（6）后 shop_roll 不再上架（见其 mastery_level 参数）。
 	"weapon_mastery_book": {"name": "武器精通手册", "rarity": "epic", "desc": "武器精通 +1（每层攻击 +3，满 6 层进化）",
 		"effect": {"weapon_mastery": 1.0}},
+	# ---- 2026-09-20 商店扩充（同文档 §2）：消耗品 / 一次性效果。带 `price` = 固定价
+	# （优先于稀有度价，见 shop_price）；rarity 仍决定抽取权重。效果键在 Player.apply_item
+	# 与 Battle 购买回调两侧分发（跨模块键：reroll / extra_card）。
+	"s_refill": {"name": "血包", "rarity": "common", "desc": "立即回复 50% 最大生命", "price": 15,
+		"effect": {"heal_pct": 0.5}},
+	"s_reroll": {"name": "刷新", "rarity": "common", "desc": "立即刷新本次商店的商品", "price": 10,
+		"effect": {"reroll": 1}},
+	"s_extracard": {"name": "预知未来", "rarity": "uncommon", "desc": "下次升级多一个选项（可叠加）", "price": 20,
+		"effect": {"extra_card": 1}},
+	"s_magnet": {"name": "临时磁铁", "rarity": "uncommon", "desc": "本局剩余时间拾取范围 ×2", "price": 25,
+		"effect": {"magnet_mul": 2.0}},
+	"s_thorns_sm": {"name": "荆棘挂件", "rarity": "uncommon", "desc": "立即获得反甲 +30%", "price": 30,
+		"effect": {"thorns": 0.3}},
+	"s_shield_sm": {"name": "一次性护盾", "rarity": "common", "desc": "立即获得 30 点护盾", "price": 20,
+		"effect": {"shield_flat": 30.0}},
+	"s_resurrect": {"name": "复活币", "rarity": "rare", "desc": "本局死亡后原地复活一次（回 50% 生命）", "price": 80,
+		"effect": {"resurrect": 1}},
 }
 
 
@@ -359,9 +376,14 @@ static func shop_roll(n: int, owned: Variant = null, mastery_level := -1) -> Arr
 
 
 ## 物品价格：基础价 × 玩家的商店折扣。
+## 带 `price` 字段的道具用固定价（2026-09-20 商店扩充），否则按稀有度价 ——
+## 现有 27 项无 price ⇒ 与旧行为逐位一致。复活币在困难难度价格翻倍（同文档 §2 注）。
 static func shop_price(item_id: String, discount: float) -> int:
 	var d: Dictionary = ITEM_DEFS[item_id]
-	return maxi(1, roundi(float(RARITY_PRICE[d["rarity"]]) * discount))
+	var base: float = float(d["price"]) if d.has("price") else float(RARITY_PRICE[d["rarity"]])
+	if item_id == "s_resurrect" and GameSession.difficulty == "hard":
+		base *= 2.0
+	return maxi(1, roundi(base * discount))
 
 
 ## 全局随机源（商店抽卡用；不污染全局 randf 的调用顺序）
@@ -398,6 +420,48 @@ const BOSS_WAVES: Array[int] = [10, 20]
 ## 是否为 Boss 波。波 ≤20 只看固定表（逐位不变）；无尽下每 ENDLESS_BOSS_PERIOD 波补一只。
 static func is_boss_wave(wave_num: int) -> bool:
 	return BOSS_WAVES.has(wave_num) or (wave_num > WAVE_COUNT and wave_num % ENDLESS_BOSS_PERIOD == 0)
+
+# ============================================================ 难度系统（2026-09-20）
+#
+# 普通 / 困难两档。**现有全部数值 = 普通**，普通档系数恒为 1.0（selftest 逐位不漂的红线）。
+# 纪律（需求文档 §1.3）：难度差异【只在数据入口乘系数】—— Enemy.gd / Battle.gd 里
+# 不准出现 if difficulty == "hard"。三个乘区收口在 hp_scale / dmg_scale / spawn_count
+# 三个入口函数内部；Boss 血量独立由 boss_hp_mul 收口（见 boss_wave_hp_mul）。
+#
+# ⚠️ 全部是占位数字，后续调平【只改这张表】，不动任何逻辑。
+const DIFFICULTIES := {
+	"normal": {
+		"name": "普通",
+		"hp_mul": 1.0, "dmg_mul": 1.0, "spawn_mul": 1.0, "boss_hp_mul": 1.0,
+		"boss_has_timer": false,   # Boss 波不卡 30 秒时限（两档一致，预留可调）
+	},
+	"hard": {
+		"name": "困难",
+		"hp_mul": 1.5,             # 敌人血量 ×1.5
+		"dmg_mul": 1.3,            # 敌人伤害 ×1.3
+		"spawn_mul": 1.2,          # 同波刷怪量 ×1.2（四舍五入）
+		"boss_hp_mul": 3.0,        # Boss 血量在动态计算基础上再 ×3
+		"boss_has_timer": false,
+	},
+}
+
+
+## 当前难度键（GameSession.difficulty 是权威数据源；非法值回落普通 —— 探针/旧存档安全）。
+## GameSession 与本类互相引用的是【全局 class_name】而非 preload，运行期解析，无循环加载问题。
+static func difficulty_key() -> String:
+	var d := String(GameSession.difficulty)
+	return d if DIFFICULTIES.has(d) else "normal"
+
+
+## 当前难度定义行（副本，调用方可安全读改）。
+static func difficulty_def() -> Dictionary:
+	return DIFFICULTIES[difficulty_key()].duplicate()
+
+
+## 当前难度显示名（HUD / 选人 / 结算共用）。
+static func difficulty_name() -> String:
+	return String(difficulty_def()["name"])
+
 ## 波末升级三选一的选项数（基础值；学习豪的天赋会 +1）。
 const UPGRADE_OPTIONS := 3
 
@@ -628,7 +692,14 @@ const XP_GROWTH := 1.32
 const MAX_DODGE := 0.8
 const MAX_CRIT := 0.9
 const MAX_LIFESTEAL := 0.9
-const MAX_PROJ := 5
+## 冷却缩减上限（cdr 卡，2026-09-20 扩充）：40% 之后不再叠加（防主动道具零冷却）。
+const MAX_CDR := 0.40
+## 护盾脱战回充延迟（秒）：最后一次受击后静置这么久回充一层盾（能量护盾卡，2026-09-20）。
+const SHIELD_REGEN_DELAY := 3.0
+## 暴击伤害封顶（伤害倍率，1.5 基础 + critd 卡每张 +0.4）。封顶意义见 Player.recalc_stats。
+const MAX_CRITD := 6.0
+## 弹道数【不设上限】（2026-09-20 用户需求）：原 MAX_PROJ=5 已删除——约束改由
+## 「总扇面角封顶 + 压缩间隔角」承担（见 MAX_PROJ_SPREAD），弹道卡可无限叠加。
 const MAX_ASPD := 10.0   # [PLACEHOLDER] 攻速倍率硬上限，防止极端叠加导致间隔→0
 
 # ============================================================ 弹道
@@ -644,6 +715,10 @@ const PROJ_LIFE := 0.8
 const PROJ_PIERCE := 2
 ## 多弹道扇形的每发偏角（弧度）。
 const PROJ_SPREAD := 0.3
+## 多弹道总扇面宽度上限（弧度）= 5 条时的旧扇面跨度（4 × PROJ_SPREAD = 1.2）
+## ⇒ 1..5 条逐位不变；6 条起扇面封顶，改为压缩间隔角 step = MAX_PROJ_SPREAD / (n-1)。
+## 用户需求（2026-09-20）：弹道不设上限，达到当前最大角度后缩短弹道之间的角度。
+const MAX_PROJ_SPREAD := 1.2
 ## 天赋增伤：本切片土豆无天赋，固定 1.0。
 const PROJ_DMG_BOOST := 1.0
 
@@ -852,13 +927,17 @@ const SPAWN_RESERVE_RADIUS := 250.0 * SPATIAL_SCALE
 ## 目的：修掉「开局一股脑全出 → 玩家清完 → 干等倒计时结束」。
 const SPAWN_WINDOW := 26.0
 ## 场上同时存活的上限（性能保护）。达到上限时投放会暂停，怪被清掉后继续。
-const SPAWN_LIVE_CAP := 80
+## ⚠️ 2026-09-20 用户调平：80 → 160（数量翻倍配套）。**这是性能护栏** ——
+## 若 playtest 出现掉帧，第一个回调点就是这里（回到 100~120 之间）。
+const SPAWN_LIVE_CAP := 160
 ## 每波投放总数 = SPAWN_BASE + 波次 × SPAWN_GROWTH。
 ## 难度二调（2026-09-19）：旧值 10+4（波1=14）配合无限射程，站桩即可清完前几波。
 ## 现在 16+5 → 波1=21、波5=41、波10=66、波20=116（受 LIVE_CAP=80 截停）；
 ## 再叠加攻击距离门（怪走进 230px 才会被打），前 3 波站桩必然被围死。
-const SPAWN_BASE := 16
-const SPAWN_GROWTH := 5
+## ⚠️ 2026-09-20 用户调平「数量 ×2」：16+5 → 32+10 ⇒ 波1=42、波10=132、
+## 波20=232（配套 COUNT_CAP=280 / LIVE_CAP=160）。**注意金币与经验掉落也随数量翻倍。**
+const SPAWN_BASE := 32
+const SPAWN_GROWTH := 10
 
 # ============================================================ 敌人模板
 
@@ -871,7 +950,9 @@ const SPAWN_GROWTH := 5
 const ENEMY_TEMPLATES := {
 	"Slime": {"hp": 20, "dmg": 5, "spd": 60, "radius": 12, "gold": 1, "def": 0, "behavior": "melee"},
 	"Medium": {"hp": 50, "dmg": 10, "spd": 80, "radius": 16, "gold": 2, "def": 0, "behavior": "melee"},
-	"Elite": {"hp": 120, "dmg": 15, "spd": 70, "radius": 20, "gold": 4, "def": 0, "behavior": "melee"},
+	# Elite 血量 120 → 360（2026-09-20 用户要求「精英怪提升至 3 倍」，精确 ×3）。
+	# 精英不进普通怪波次池（spawn_types 无 Elite）⇒ 不影响 Boss 动态血的 avg 基准。
+	"Elite": {"hp": 360, "dmg": 15, "spd": 70, "radius": 20, "gold": 4, "def": 0, "behavior": "melee"},
 	"Ranged": {"hp": 35, "dmg": 8, "spd": 55, "radius": 14, "gold": 3, "def": 0, "behavior": "ranged"},
 	"Boss": {"hp": 600, "dmg": 25, "spd": 45, "radius": 36, "gold": 25, "def": 0, "behavior": "boss"},
 	# ---- 2026-09-20 新敌人批次（docs/新敌人_代码接入说明_2026-09-20.md §2 数值原文粘贴，全 [PLACEHOLDER]）----
@@ -922,7 +1003,7 @@ const SUPPORT_WANDER_MAX := 350.0
 ## spawn = 首次进入玩家视野时冒泡（每只一次）；death = 被击杀时；skill = 放招喊话
 ## （键 = boss 三招名，或行为事件 windup/fuse/pulse）。**缺键 = 不说话** ——
 ## Slime/Medium/Rat/Student 刻意不登记：杂鱼满场刷台词会把气泡变成噪音。
-## 用户点名：牛马 spawn「牛来~」death「妈--妈--」。
+## 用户点名：牛马 spawn「牛来~」death 也改为「牛来~」（2026-09-20 二次指令，原「妈--妈--」）。
 const ENEMY_TAUNTS := {
 	"Elite": {"spawn": "就这就这？", "death": "我不甘心！"},
 	"Ranged": {"spawn": "你瞅啥？", "death": "告辞！"},
@@ -930,7 +1011,7 @@ const ENEMY_TAUNTS := {
 		"skill": {"fan": "万箭齐发！", "charge": "冲鸭——！！", "summon": "孩子们，上！"}},
 	"BossPUA": {"spawn": "欢迎入职~", "death": "这届员工不行……",
 		"skill": {"fan": "都听我说！", "charge": "绩效冲刺！！", "summon": "都是自己人！"}},
-	"Ox": {"spawn": "牛来~", "death": "妈--妈--"},
+	"Ox": {"spawn": "牛来~", "death": "牛来~"},
 	"Charger": {"spawn": "卷王来卷了", "skill": {"windup": "卷起来！！"}, "death": "卷不动了……"},
 	"Bomber": {"spawn": "班味要炸了", "skill": {"fuse": "班味爆炸！！"}, "death": "……没炸成"},
 	"Splitter": {"spawn": "我精神状态很好", "death": "啊啊啊裂开了！！"},
@@ -975,6 +1056,19 @@ const UPGRADE_POOL := [
 	# 叠层期间不再白板；借用 C2 的 max/stat 封顶过滤：满层后自动从升级池消失。
 	{"id": "weapon_mastery", "name": "武器精通", "tiers": [3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
 		"pct": false, "cost_tier": 3, "max": 6.0, "stat": "weapon_level"},
+	# ---- 2026-09-20 升级池扩充（《升级与商店扩充方案_给代码AI_2026-09-20.md》§1，数值 [PLACEHOLDER]）----
+	# 新 stat 的收口全在 Player.recalc_stats；图标见 AssetDB.UPGRADE_ICONS（同批入库）。
+	{"id": "critDmg", "name": "暴击伤害", "tiers": [0.30, 0.45, 0.60], "pct": true, "cost_tier": 3,
+		"max": 6.0, "stat": "critd"},
+	{"id": "range", "name": "攻击距离", "tiers": [0.15, 0.20, 0.25], "pct": true, "cost_tier": 1},
+	{"id": "projSpeed", "name": "弹速", "tiers": [0.20, 0.25, 0.30], "pct": true, "cost_tier": 1},
+	{"id": "expGain", "name": "学习能力", "tiers": [0.15, 0.20, 0.25], "pct": true, "cost_tier": 2},
+	{"id": "thorns", "name": "反甲", "tiers": [0.25, 0.40, 0.60], "pct": true, "cost_tier": 2},
+	{"id": "shield", "name": "能量护盾", "tiers": [15.0, 25.0, 40.0], "pct": false, "cost_tier": 2},
+	{"id": "lucky", "name": "幸运", "tiers": [0.10, 0.15, 0.20], "pct": true, "cost_tier": 1},
+	{"id": "maxHpPct", "name": "强壮", "tiers": [0.10, 0.12, 0.15], "pct": true, "cost_tier": 3},
+	{"id": "cdr", "name": "冷却缩减", "tiers": [0.12, 0.18, 0.24], "pct": true, "cost_tier": 2,
+		"max": 0.40, "stat": "cdr"},
 ]
 
 # ---- 波末升级捆绑的「敌人代价」（参考 A1 双向升级投票；2026-09-20 用户选 A：只在波末捆绑）----
@@ -1026,29 +1120,42 @@ static func _slope(w: int, base: float, slope: float, mul: float) -> float:
 	return at_cap + float(w - WAVE_COUNT) * slope * mul
 
 
-## 波次血量缩放：波 ≤20 为 1.1 + (wave-1)*0.10（波1 = ×1.1、波10 = ×2.0、波20 = ×3.0）。
+## 波次血量斜率（2026-09-20 用户调平）：目标【波 20 = ×8.0】
+## ⇒ (8.0 − 1.1) / 19 = 0.36316/波（原先 0.10 ⇒ 波 20 = ×3.0）。
+## 波 ≤20：hp = 1.1 + (波−1) × 该斜率；波 1 仍为 ×1.1（前期手感不变）。
+## 波 >20：从此值起按 ENDLESS_HP_SLOPE_MUL(1.6) 放大斜率继续爬（+0.581/波）。
+## 历史调参：最早 0.15（波20=×3.85）击杀崩掉 → 0.09 → 0.10；本轮按用户要求大幅抬到 0.363。
+const HP_SCALE_SLOPE := (8.0 - 1.1) / 19.0
+
+
+## 波次血量缩放：波 ≤20 为 1.1 + (wave-1)*HP_SCALE_SLOPE（波1 = ×1.1、波10 = ×4.37、波20 = ×8.0）。
 ## 波 >20 从波 20 的值起按 ENDLESS_HP_SLOPE_MUL 放大斜率继续爬。
-## 历史调参：最早 0.15（波20=×3.85）击杀崩掉 → 0.09；现因攻击距离门
-## 玩家有效输出窗口变短，整体再抬一档，前期怪更耐打、逼玩家走位拉扯。
+## 难度乘区（2026-09-20）在此收口：×DIFFICULTIES.hp_mul。普通 ×1.0 逐位不漂
+## （IEEE 浮点乘 1.0 无舍入），Enemy.setup 无需感知难度存在。
 static func hp_scale(wave_num: int) -> float:
-	return _slope(wave_num, 1.1, 0.10, ENDLESS_HP_SLOPE_MUL)
+	return _slope(wave_num, 1.1, HP_SCALE_SLOPE, ENDLESS_HP_SLOPE_MUL) * float(difficulty_def()["hp_mul"])
 
 
 ## 波次伤害缩放：波 ≤20 为 1 + (wave-1)*0.05（波1 = ×1.0、波20 = ×1.95）；
 ## 波 >20 从波 20 的值起按 ENDLESS_DMG_SLOPE_MUL 放大斜率继续爬。
+## 难度乘区（2026-09-20）在此收口：×DIFFICULTIES.dmg_mul。普通 ×1.0 逐位不漂。
 static func dmg_scale(wave_num: int) -> float:
-	return _slope(wave_num, 1.0, 0.05, ENDLESS_DMG_SLOPE_MUL)
+	return _slope(wave_num, 1.0, 0.05, ENDLESS_DMG_SLOPE_MUL) * float(difficulty_def()["dmg_mul"])
 
 
-## 每波投放总数上限（无尽模式高波的性能护栏；波 20 = 116，尚未触顶）。
-const SPAWN_COUNT_CAP := 140
+## 每波投放总数上限（无尽模式高波的性能护栏）。
+## 2026-09-20 用户调平「数量 ×2」：140 → 280（波 20 = 232 不再触顶，波 25 后封顶）。
+const SPAWN_COUNT_CAP := 280
 
 
 ## 本波计划投放的总怪数（还受 SPAWN_LIVE_CAP 约束，实际可能少投）。
 ## 波1=21、波5=41、波10=66、波20=116（SPAWN_BASE=16 + 波次×5）；
 ## 无尽高波封顶到 SPAWN_COUNT_CAP 防喷发（单调非减、有界，1..20 逐位不变）。
+## 难度乘区（2026-09-20）在此收口：×DIFFICULTIES.spawn_mul 后四舍五入。
+## 普通 ×1.0：21.0 → roundi → 21 逐位不变。
 static func spawn_count(wave_num: int) -> int:
-	return mini(SPAWN_BASE + wave_num * SPAWN_GROWTH, SPAWN_COUNT_CAP)
+	var base := float(SPAWN_BASE + wave_num * SPAWN_GROWTH) * float(difficulty_def()["spawn_mul"])
+	return mini(roundi(base), SPAWN_COUNT_CAP)
 
 
 ## 每波的平均投放速率（只/秒）。整波在 SPAWN_WINDOW 内【匀速】投放，
@@ -1094,6 +1201,54 @@ static func spawn_types(wave_num: int) -> Array:
 ## （接入说明 §4 波次表）。
 static func boss_type_for_wave(wave_num: int) -> String:
 	return "BossPUA" if wave_num == 10 else "Boss"
+
+# ---- Boss 动态血量 + 半血狂暴（2026-09-20 需求文档 §2）----
+## [PLACEHOLDER] Boss 血量动态化：boss_hp = 同波普通怪平均模板血 × BOSS_HP_AVG_MUL
+## × boss_hp_mul（难度）。原取 27（目标 Boss 战 40~60 秒）；2026-09-20 用户要求
+## 「所有 Boss 血量提升至现在的两倍」→ 27 × 2 = 54（目标时长相应翻倍）。
+## 分母仍由 boss_hp_mul 收口难度差异 ⇒ hard Boss 依然 = normal 动态值 × 3.0 精确。
+const BOSS_HP_AVG_MUL := 54.0
+## [PLACEHOLDER] 半血狂暴：血量占比低于该值时触发一次（闪烁/震屏/中央大字）。
+const BOSS_RAGE_HP_RATIO := 0.5
+## [PLACEHOLDER] 狂暴视觉反馈时长（秒）：身体红色脉冲。
+const BOSS_RAGE_FLASH_TIME := 2.5
+## [PLACEHOLDER] 屏幕中央狂暴大字的停留时长（秒）。
+const BOSS_RAGE_NOTICE_TIME := 2.2
+## [PLACEHOLDER] 狂暴触发时的震屏强度（像素）。
+const BOSS_RAGE_SHAKE := 14.0
+## 测试模式（selftest/balance）Boss 波兜底观察期（秒）：投放窗口结束后再等这么久，
+## Boss 仍未被击杀就放行推进 —— 无敌/自动驾驶玩家可能打不死动态血 Boss，
+## 没有兜底流程门禁会卡死在波 10。正常游玩【没有】这条（Boss 不死波就不结束）。
+const BOSS_WAVE_TEST_GRACE := 60.0
+
+
+## 本波刷怪池的普通怪【模板】平均血（不含波次/难度缩放 —— 缩放由 Enemy.setup 统一乘）。
+## 池子由 spawn_types 给出，恒非空；防御性除零兜底。
+static func _avg_pool_template_hp(wave_num: int) -> float:
+	var types: Array = spawn_types(wave_num)
+	if types.is_empty():
+		return 0.0
+	var sum := 0.0
+	for t in types:
+		sum += float(ENEMY_TEMPLATES[String(t)]["hp"])
+	return sum / float(types.size())
+
+
+## Boss 波的 spawn_enemy 血量乘区（WaveDirector 刷 Boss 时传入）。
+## 期望最终血 = 同波普通怪平均模板血 × 基准波次曲线 × BOSS_HP_AVG_MUL × boss_hp_mul。
+## 推导（Enemy.setup: max_hp = 模板血 × hp_scale(w) × hp_cost）：
+##   hp_cost = avg × BOSS_HP_AVG_MUL × boss_hp_mul / (Boss模板血 × 难度hp_mul)
+## 分母带难度 hp_mul 的原因：hp_scale 已携带普通怪难度乘区，除掉它才能让
+## Boss 的难度差异【只由 boss_hp_mul 收口】—— hard Boss = normal 动态值 × 3.0 精确。
+## Boss 模板血仅作归一分母保留（600/800 不再是实际战斗血量）。
+static func boss_wave_hp_mul(wave_num: int) -> float:
+	var boss_base := float(ENEMY_TEMPLATES[boss_type_for_wave(wave_num)]["hp"])
+	var avg := _avg_pool_template_hp(wave_num)
+	if boss_base <= 0.0:
+		return 1.0
+	var d := difficulty_def()
+	return avg * BOSS_HP_AVG_MUL * float(d["boss_hp_mul"]) / (boss_base * float(d["hp_mul"]))
+
 
 
 ## 波次进度 0..1（用于难度插值）。

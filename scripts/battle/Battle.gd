@@ -186,9 +186,12 @@ func _ready() -> void:
 	# 注入发生在子节点 _ready 之后 —— TouchControls 的 setter 会立刻重算可见性。
 	if touch != null:
 		touch.has_touch_flag = _has_flag("--touch")
-	# `--endless`：无尽模式开关。必须【无条件赋值】—— 普通运行自动复位为 false；
+	# `--endless`：无尽模式开关。命令行带 flag 才强制置 true；不带 flag 不碰现值 ——
+	# 正常游玩由主菜单「无尽模式」按钮显式设值（Title → CharSelect → Battle 同进程保留）。
+	# 进程内初值即 false，独立测试进程（门禁/探针）无残留风险；同进程连跑由 Title 每局重设。
 	# 与 --char 一样要在 start_run() 之前（HUD / WaveDirector 在波次里读 GameSession.endless）。
-	GameSession.endless = _has_flag("--endless")
+	if _has_flag("--endless"):
+		GameSession.endless = true
 	print("[ENDLESS] 无尽模式=%s" % ("开" if GameSession.endless else "关"))
 	# `--char <id>`：命令行指定角色（供四角色自检 / 平衡观测四连跑）。
 	# 必须在 start_run() 之前 —— start_run() → player.reset() → apply_character() 会读
@@ -199,10 +202,23 @@ func _ready() -> void:
 		print("[CHAR] 命令行指定角色：%s（武器：%s）" % [
 			GameSession.selected_char,
 			GameStats.weapon_for_char(GameSession.selected_char)["name"]])
+	# `--difficulty <normal|hard>`：命令行指定难度（供无头自检 / 门禁验证困难乘区）。
+	# 必须在 start_run() 之前 —— Enemy.setup 经 GameStats.hp_scale 读 GameSession.difficulty。
+	# 正常游玩不传此参数：难度由主菜单选择，这里保持 GameSession 现值不动。
+	var forced_diff := _arg_value("--difficulty")
+	if forced_diff != "" and GameStats.DIFFICULTIES.has(forced_diff):
+		GameSession.difficulty = forced_diff
+		print("[DIFF] 命令行指定难度：%s" % GameStats.difficulty_name())
 	_build_floor_overlays()
 	player.battle = self
 	player.fired.connect(_on_player_fired)
 	player.evolved.connect(_on_player_evolved)
+	# 【2026-09-20 全库审查 P0】等级升级入队。此前 leveled_up 只 emit 没人听，
+	# _upgrade_queue 从未有 "level" 入队 —— 等级三选一面板自始至终没弹出过
+	# （波末升级走 WaveDirector 直调 _open_upgrade("wave")，把这条断点完全掩盖了）。
+	# 连升多级 → 多次 emit → 队列多条，_maybe_open_queued_upgrade 逐条弹出。
+	player.leveled_up.connect(func(_new_level: int) -> void:
+		_upgrade_queue.append("level"))
 	feedback = BattleFeedback.new()
 	add_child(feedback)
 	feedback.setup(world)
@@ -268,7 +284,8 @@ func _ready() -> void:
 		player.autopilot = true
 		player.god_mode = false
 		_def_probe_ok = true
-		print("[BALANCE] 平衡观测模式：自动驾驶 + 真实伤害，最多跑满 %d 波" % GameStats.WAVE_COUNT)
+		print("[BALANCE] 平衡观测模式：自动驾驶 + 真实伤害，%s" %
+			("无尽曲线跑到阵亡为止" if GameSession.endless else "最多跑满 %d 波" % GameStats.WAVE_COUNT))
 		print("[BALANCE] 只看压力曲线（投放量 / 同屏峰值 / 击杀速度 / 存活深度），不看生死")
 
 	if selftest_defeat:
@@ -339,6 +356,9 @@ func start_run() -> void:
 	spawn_obstacles_via_wave()
 	result_panel.hide_panel()
 	upgrade_panel.hide_panel()
+	# 商店面板同样收起（审查 P2）：异常路径下重开一局（暂停菜单 restart）时，
+	# 上一局可能停在 SHOP 状态 —— 面板 visible 残留会盖住新局。close() 幂等安全。
+	shop_panel.close()
 	hud.set_visible_hud(true)
 	start_next_wave()
 
@@ -511,7 +531,22 @@ func _tick_fighting(delta: float) -> void:
 	# 失败路径自检冻结波次计时：杜绝「苟活到波末→升级→通关」这条非确定性路径。
 	if not selftest_defeat:
 		wave_timer -= delta
-		if wave_timer <= 0.0:
+		if GameStats.is_boss_wave(wave_num):
+			# Boss 波（2026-09-20 需求 §2.1）：30 秒倒计时不再触发结算 —— wave_timer
+			# 只负责驱动投放窗口（tick_spawn），波的推进条件改为【Boss 死亡】。
+			if not _has_alive_boss():
+				wave.end_wave()
+				return
+			# 测试模式兜底：selftest/balance 的无敌/自动驾驶玩家可能打不死动态血
+			# Boss，投放窗口结束后再观察 BOSS_WAVE_TEST_GRACE 秒仍无果就放行，
+			# 保证流程门禁不卡死。正常游玩没有这条 —— Boss 不死波就不结束。
+			if _testing() and wave_timer <= GameStats.WAVE_DURATION - GameStats.SPAWN_WINDOW \
+					- GameStats.BOSS_WAVE_TEST_GRACE:
+				print("[%s] Boss 波 #%d 兜底推进（Boss 未被击杀，测试观察期已过）" % [
+					_test_tag(), wave_num])
+				wave.end_wave()
+				return
+		elif wave_timer <= 0.0:
 			wave.end_wave()
 			return
 
@@ -571,6 +606,7 @@ func _on_player_evolved(form_name: String) -> void:
 	feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
 		label, Color(1.0, 0.84, 0.0), true)
 	shake()
+	feedback.play_evolution_nova(player.global_position)
 	_on_sfx_requested("coin", -2.0, 1.3)
 	_on_sfx_requested("kill", -2.0, 0.8)
 
@@ -617,6 +653,23 @@ func _tick_enemy_taunts() -> void:
 func _on_enemy_line(pos: Vector2, text: String) -> void:
 	taunt_lines_shown += 1
 	feedback.spawn_float(pos, text, Color(1.0, 0.9, 0.55), true)
+
+
+## 场上是否还有存活的 Boss 行为怪（Boss 波「Boss 死亡才推进」的判定）。
+func _has_alive_boss() -> bool:
+	for e in enemies:
+		if is_instance_valid(e) and not e.is_dead and e.behavior == "boss":
+			return true
+	return false
+
+
+## Boss 半血狂暴（2026-09-20 需求 §2.3）：震屏 + 屏幕中央大字 + 爆裂 + 低沉音效。
+## 身体闪烁由 Enemy 自演（modulate 红色脉冲）；程序化反馈，无新美术。
+func _on_boss_rage(pos: Vector2) -> void:
+	shake(GameStats.BOSS_RAGE_SHAKE)
+	hud.show_center_notice("BOSS 狂暴了！", GameStats.BOSS_RAGE_NOTICE_TIME)
+	feedback.spawn_burst(pos, Color(0.95, 0.2, 0.2), true)
+	_on_sfx_requested("kill", -2.0, 0.7)
 
 
 func _on_boss_summon(pos: Vector2, type_name: String, count: int) -> void:
@@ -710,8 +763,7 @@ func _open_upgrade(reason: String) -> void:
 func _generate_options() -> void:
 	var avail: Array = []
 	for def in GameStats.UPGRADE_POOL:
-		if def["id"] == "proj" and player.proj >= GameStats.MAX_PROJ:
-			continue
+		# 弹道数卡不再因上限过滤（2026-09-20 用户需求：弹道不设上限，可无限叠加）。
 		# C2 迭代：带 max 上限的属性（闪避/暴击/吸血）到顶后不再出现 —— 无效卡是负反馈
 		if def.has("max") and float(player.get(String(def["stat"]))) >= float(def["max"]):
 			continue
@@ -725,8 +777,13 @@ func _generate_options() -> void:
 				opt["cost"] = cost
 		avail.append(opt)
 	avail.shuffle()
-	# 选项数 = 基础值 + 角色天赋加成（学习豪 +1）
-	var count := GameStats.UPGRADE_OPTIONS + int(GameStats.character(player.char_id)["upgrade_opt_bonus"])
+	# 选项数 = 基础值 + 角色天赋加成（学习豪 +1）+ 预知未来额外选项（2026-09-20 扩充，
+	# 与天赋叠加；消费后清零 —— 「下次升级」语义）。
+	var extra_cards: int = player.extra_card_pending
+	if extra_cards > 0:
+		player.extra_card_pending = 0
+	var count := GameStats.UPGRADE_OPTIONS \
+		+ int(GameStats.character(player.char_id)["upgrade_opt_bonus"]) + extra_cards
 	var pick: Array = avail.slice(0, mini(count, avail.size()))
 	# 武器进化可达性升级（2026-09-20，用户拍板全选四方案之二）：
 	# 卡池 12 条均匀抽 3，武器精通单次出现率仅 25%，实测多数局凑不满 6 层 —— 进化形同虚设。
@@ -813,7 +870,12 @@ func _on_shop_purchased(item_id: String, price: int, index: int) -> void:
 	player.gold -= price
 	player.apply_item(item_id)
 	items_owned.append(item_id)   # A4 前置解锁链：记录已购（下波商店前置判定用）
-	shop_panel.mark_sold(index)
+	# 「刷新」道具（2026-09-20 商店扩充）：整批商品重抽 —— 不锁卡（新商品上来）、
+	# 已扣的钱不退；重抽沿用当前折扣与前置链状态。其余道具照旧锁卡防重复购买。
+	if item_id == "s_reroll":
+		shop_panel.reroll(player.shop_discount, items_owned, player.weapon_level)
+	else:
+		shop_panel.mark_sold(index)
 	if audio != null:
 		audio.play("buy", -4.0)
 	shop_panel.refresh(player.gold)
@@ -858,9 +920,14 @@ func _end_run(victory: bool) -> void:
 		feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
 			"回收 +%d" % salvage, Color(1.0, 0.84, 0.0), false)
 	# 局外账本入账（A2/A6 迭代）：最佳波次 / 累计击杀 / 累计金币，跨局持久化。
+	# 2026-09-20 无尽体验：无尽局额外更新 best_endless_wave；入账前先读旧纪录，
+	# 阵亡时若超过旧纪录 → 结算页标「新纪录」。
 	# 守卫：自检与探针进程的战绩不写真实账本（否则门禁跑完用户账本全是测试数据）。
+	var endless_best_before := 0
+	if GameSession.endless:
+		endless_best_before = int(MetaSave.ledger()["best_endless_wave"])
 	if not _testing() and not _probe_process():
-		MetaSave.record_run(victory, waves_completed, kills, player.gold)
+		MetaSave.record_run(victory, waves_completed, kills, player.gold, GameSession.endless)
 	player.set_physics_process(false)
 	# 结算前清场：不然面板盖上来后，背景还站着一群静止的怪
 	_free_all_enemies()
@@ -876,6 +943,13 @@ func _end_run(victory: bool) -> void:
 		"kills": kills,
 		"level": player.level,
 		"gold": player.gold,
+		"difficulty": GameStats.difficulty_name(),
+		# 无尽体验（2026-09-20）：模式标记 + 历史最佳 + 是否破纪录（字段缺省时面板按普通局渲染，
+		# 旧调用方/探针零影响）。破纪录只认「真跑」——测试进程不入账，也谈不上破纪录。
+		"endless": GameSession.endless,
+		"endless_best": maxi(endless_best_before, waves_completed if GameSession.endless else 0),
+		"new_record": GameSession.endless and not _testing() and not _probe_process()
+			and waves_completed > endless_best_before,
 	})
 	hud.set_visible_hud(false)
 	# 结算即战斗结束：①作废挂起的 hit-stop 回调（否则它可能在结算后才触发，
@@ -946,10 +1020,11 @@ func _finish_selftest() -> void:
 		])
 
 	print("[SELFTEST] --------------------------------------------------")
-	print("[SELFTEST] char=%s weapon=%s trait=%s" % [
+	print("[SELFTEST] char=%s weapon=%s trait=%s difficulty=%s" % [
 		player.char_id,
 		GameStats.weapon_for_char(player.char_id)["name"],
 		player.trait_id if player.trait_id != "" else "(none)",
+		GameStats.difficulty_name(),
 	])
 	print("[SELFTEST] kills=%d" % kills)
 	print("[SELFTEST] waves_completed=%d / %d" % [waves_completed, _selftest_target_waves()])
@@ -1153,7 +1228,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if state == State.FIGHTING and not get_tree().paused:
 			pause_menu.open()
 			get_viewport().set_input_as_handled()
-	elif event is InputEventKey and event.pressed and event.physical_keycode == KEY_R:
+	# not is_echo()：长按 R 会连发 echo 事件 —— 旧实现一次长按触发十几次整局重置
+	#（审查 P1）。只在首次按下响应，按住不重复。
+	elif event is InputEventKey and event.pressed and not event.is_echo() \
+			and event.physical_keycode == KEY_R:
 		Engine.time_scale = 1.0
 		pause_menu.close()
 		start_run()
@@ -1216,7 +1294,10 @@ func _build_speed_button() -> void:
 func _cycle_speed() -> void:
 	var idx := SPEED_STEPS.find(speed_mul)
 	speed_mul = float(SPEED_STEPS[(idx + 1) % SPEED_STEPS.size()])
-	if not _testing():
+	# hit-stop 进行中只更新权威值 speed_mul、不碰 Engine.time_scale（审查 P2）——
+	# 否则暴击顿帧里点一下按钮就把时标顶回倍速值，hit-stop 被提前掐掉；
+	# 恢复回调本来就读最新 speed_mul，顿帧结束后自然落到新倍速。
+	if not _testing() and not _hitstop:
 		Engine.time_scale = speed_mul
 	_update_speed_button()
 

@@ -105,7 +105,8 @@ func _phase_buy() -> void:
 			var eff: Dictionary = GameStats.ITEM_DEFS[id]["effect"]
 			var simple := true
 			for k in eff.keys():
-				if String(k) in ["gold", "gold_per_kill", "shop_discount", "xp_mul"]:
+				if String(k) in ["gold", "gold_per_kill", "shop_discount", "xp_mul",
+					"heal_pct", "reroll", "extra_card", "magnet_mul", "shield_flat", "resurrect"]:
 					simple = false
 			if not simple:
 				continue
@@ -141,7 +142,8 @@ func _phase_check_bought() -> void:
 	var eff: Dictionary = GameStats.ITEM_DEFS[bought_id]["effect"]
 	for k in eff.keys():
 		var key := String(k)
-		if key in ["gold", "gold_per_kill", "shop_discount", "xp_mul"]:
+		if key in ["gold", "gold_per_kill", "shop_discount", "xp_mul",
+			"heal_pct", "reroll", "extra_card", "magnet_mul", "shield_flat", "resurrect"]:
 			continue
 		var before: float = float(bonus_before.get(key, 0.0))
 		var now: float = float(battle.player._bonus.get(key, 0.0))

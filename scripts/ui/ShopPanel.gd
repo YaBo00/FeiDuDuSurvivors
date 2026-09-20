@@ -166,6 +166,19 @@ func open(wave_num: int, gold: int, discount: float, on_close: Callable,
 	visible = true
 
 
+## 刷新商品（「刷新」道具，2026-09-20 商店扩充）：整批重抽 SHOP_SLOTS 件、
+## 重置售出状态与价格（沿用当前折扣与前置链）。已扣的钱不退；金币显示由调用方随后 refresh。
+func reroll(discount: float, owned: Variant = null, mastery_level: int = -1) -> void:
+	_ids = GameStats.shop_roll(GameStats.SHOP_SLOTS, owned, mastery_level)
+	_prices.clear()
+	_sold.clear()
+	for id in _ids:
+		_prices.append(GameStats.shop_price(id, discount))
+		_sold.append(false)
+	_hint.text = "已刷新 · 新上一批商品（%d 件）" % _ids.size()
+	refresh(_gold)
+
+
 ## 刷新金币显示与每张卡的可买状态。
 func refresh(gold: int) -> void:
 	_gold = gold

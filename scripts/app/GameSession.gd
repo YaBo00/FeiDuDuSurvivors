@@ -13,21 +13,18 @@ extends RefCounted
 ## 选中的角色 id（对应 GameStats.CHARACTERS 的键）。
 static var selected_char: String = "basic"
 
-## 上一局的结算快照（供结算界面与后续统计用）。
-static var last_result: Dictionary = {}
-
 ## 无尽模式开关（由 Battle 解析 `--endless` 置位）。false = 现行 20 波通关。
 ## ⚠️ 由【命令行】决定，begin_run() 刻意不碰它 —— 换角色重开一局不应改变模式。
 static var endless: bool = false
 
+## 当前难度（2026-09-20 难度系统）："normal" / "hard"，数值收口在 GameStats.DIFFICULTIES。
+## 由【主菜单难度选择】决定（Battle 另解析 `--difficulty` 供无头自检覆盖）；
+## ⚠️ 与 endless 同理：begin_run() 刻意不碰它 —— 换角色重开一局不应改变难度。
+static var difficulty: String = "normal"
 
-## 开局前调用：记录角色并清掉上一局的结算快照。
-## 注意：不重置 endless（模式由命令行决定，见上）。
+
+## 开局前调用：记录角色。
+## （旧 finish_run/last_result 已删：结算快照写进后从无人读 —— 结算展示走
+##  Battle._end_run 直填 ResultPanel，战绩持久化走 MetaSave.record_run。审查清理）
 static func begin_run(char_id: String) -> void:
 	selected_char = char_id if GameStats.CHARACTERS.has(char_id) else GameStats.DEFAULT_CHAR
-	last_result = {}
-
-
-## 结算时调用。
-static func finish_run(result: Dictionary) -> void:
-	last_result = result

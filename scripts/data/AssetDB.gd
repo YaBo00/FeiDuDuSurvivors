@@ -96,7 +96,8 @@ const DROP_CONTENT_H := 40         # 实测：金币 40 / 经验 39 / 血瓶 42
 const DISPLAY_PX_PER_RADIUS := 3.1
 
 # ================================================================ 武器弹道
-## 四人专属武器的弹道贴图（2026-09-19 交付；源目录 `美术资源\weapons\`，规格见其 导入流程.md）。
+## 角色武器弹道贴图（2026-09-19 四人 + 09-20 土豆/袋鼠 + 09-20 六把进化第二形态 `_evo`；
+## 源目录 `美术资源\weapons\`，规格见其 导入流程.md）。
 ##
 ## 字段：
 ##   tex      资源相对路径（ROOT 下）
@@ -153,13 +154,60 @@ const WEAPON_BULLETS := {
 		"cell_px": 26.0,
 		"fallback": Color("#8CF07A"),
 	},
+	# ---- 进化第二形态专属弹道（2026-09-20 交付）：键 = 基础键 + "_evo"。
+	# CombatResolver 进化态优先取本表，未配置/贴图缺失回落基础键（没美术也能跑）。
+	# 显示尺寸与基础弹一致 —— 判定半径没变，视觉大小跟着判定走（见 DISPLAY_PX_PER_RADIUS）。
+	# content 单帧图为 α>=128 实测实体主体包围盒（PIL，2026-09-20）；sheet 沿用帧格中心对齐。
+	"basic_evo": {
+		"tex": "weapons/w_basic_duet.png",
+		"frames": 1, "fw": 64, "fh": 64, "step": 0, "fps": 0.0,
+		"content": Rect2(3, 5, 61, 59),
+		"cell_px": 40.0,
+		"fallback": Color("#FFD700"),
+	},
+	"study_evo": {
+		"tex": "weapons/w_study_nib.png",
+		"frames": 1, "fw": 64, "fh": 64, "step": 0, "fps": 0.0,
+		"content": Rect2(0, 10, 62, 54),
+		"cell_px": 30.0,
+		"fallback": Color("#CFE8FF"),
+	},
+	"finance_evo": {
+		"tex": "weapons/w_finance_ingot.png",
+		"frames": 4, "fw": 96, "fh": 96, "step": 108, "fps": 10.0,
+		"content": Rect2(),
+		"cell_px": 42.0,
+		"fallback": Color("#FFD700"),
+	},
+	"sad_evo": {
+		"tex": "weapons/w_sad_siphon.png",
+		"frames": 4, "fw": 128, "fh": 128, "step": 144, "fps": 7.0,
+		"content": Rect2(),
+		"cell_px": 52.0,
+		"fallback": Color("#6B2FA0"),
+	},
+	"potato_evo": {
+		"tex": "weapons/w_potato_crack.png",
+		"frames": 1, "fw": 64, "fh": 64, "step": 0, "fps": 0.0,
+		"content": Rect2(9, 9, 45, 46),
+		"cell_px": 64.0,
+		"fallback": Color("#C89B5A"),
+	},
+	"kangaroo_evo": {
+		"tex": "weapons/w_kanga_ghost.png",
+		"frames": 1, "fw": 64, "fh": 64, "step": 0, "fps": 0.0,
+		"content": Rect2(9, 9, 46, 46),
+		"cell_px": 26.0,
+		"fallback": Color("#8CF07A"),
+	},
 }
 
-## 特效贴图（2026-09-20 交付）：命中爆花 4 帧横排 sheet + 暴击星芒单帧。
-## DeathBurst 消费：贴图缺失时回落程序圆点画法（没美术也能跑）。
+## 特效贴图：命中爆花 4 帧横排 sheet + 暴击星芒单帧 + 进化新星环 4 帧（2026-09-20 交付）。
+## DeathBurst/EvoNova 消费：贴图缺失时回落程序画法（没美术也能跑）。
 const FX := {
 	"hit_burst": {"tex": "fx/hit_burst.png", "frames": 4, "fw": 128, "fh": 128},
 	"crit_star": {"tex": "fx/crit_star.png", "frames": 1, "fw": 96, "fh": 96},
+	"evo_nova": {"tex": "fx/evo_nova.png", "frames": 4, "fw": 128, "fh": 128},
 }
 
 ## 界面杂图（非按钮/卡片框架类）。
@@ -208,6 +256,14 @@ const ITEMS := {
 	"active_nuke": "items/active_nuke.png",
 	"active_speed_boots": "items/active_speed_boots.png",
 	"active_time_stop": "items/active_time_stop.png",
+	# 2026-09-20 商店扩充的 7 张道具图标（同批入库；items/ 规格 128×128 带 alpha）
+	"s_refill": "items/s_refill.png",
+	"s_reroll": "items/s_reroll.png",
+	"s_extracard": "items/s_extracard.png",
+	"s_magnet": "items/s_magnet.png",
+	"s_thorns_sm": "items/s_thorns_sm.png",
+	"s_shield_sm": "items/s_shield_sm.png",
+	"s_resurrect": "items/s_resurrect.png",
 }
 
 ## 升级选项的图标（GameStats.UPGRADE_POOL 的 id → 图标路径）。
@@ -224,6 +280,16 @@ const UPGRADE_ICONS := {
 	"harvest": "ui/upgrade_harvest.png",
 	"pickupRange": "ui/upgrade_pickupRange.png",
 	"proj": "ui/upgrade_proj.png",
+	# 2026-09-20 升级池扩充的 9 张图标（美术资源/道具/新增_2026-09-20/ 入库缩放到同规格）
+	"critDmg": "ui/upgrade_critDmg.png",
+	"range": "ui/upgrade_range.png",
+	"projSpeed": "ui/upgrade_projSpeed.png",
+	"expGain": "ui/upgrade_expGain.png",
+	"thorns": "ui/upgrade_thorns.png",
+	"shield": "ui/upgrade_shield.png",
+	"lucky": "ui/upgrade_lucky.png",
+	"maxHpPct": "ui/upgrade_maxHpPct.png",
+	"cdr": "ui/upgrade_cdr.png",
 }
 
 const UI := {
@@ -233,7 +299,6 @@ const UI := {
 	"card_frame": "ui/card_frame.png",
 	"card_frame_sel": "ui/card_frame_sel.png",
 	"gold_plate": "ui/gold_plate.png",
-	"spare_a": "ui/spare_a.png",
 	"button_normal": "ui/button_normal.png",
 	"button_hover": "ui/button_hover.png",
 	"button_pressed": "ui/button_pressed.png",
@@ -242,8 +307,9 @@ const UI := {
 const BG := {
 	"title": "bg/title.webp",
 	"charsel": "bg/charsel.webp",
-	"grass": "bg/grass.png",
 	## 波次主题地面整图（键 = "floor_" + 主题 id，与 GameStats.FLOOR_THEMES 对齐）
+	## （旧 "grass" 键已删：Godot 版地面走 FLOOR_THEMES 五主题，无 grass；
+	##  png 源文件与 ImportArt 管线映射保留，仅摘除运行时注册。2026-09-20 审查清理）
 	"floor_ceramic": "bg/ceramic.png",
 	"floor_wood": "bg/wood.png",
 	"floor_marble": "bg/marble.png",
@@ -262,7 +328,6 @@ const EXPECT := {
 	"ui/": {"size": Vector2i(128, 128), "alpha": true},
 	"bg/title.webp": {"size": Vector2i(1920, 1080), "alpha": false},
 	"bg/charsel.webp": {"size": Vector2i(1920, 1080), "alpha": false},
-	"bg/grass.png": {"size": Vector2i(512, 512), "alpha": false},
 	# 波次主题地面：2026-09-19 三调，素材由 1920x1080 整图换成 **2048x2048 正方形**
 	# 「居中徽章式地砖」。不再是 16:9 整铺 —— 由 GameStats.floor_tile_src_rect 按
 	# 瓦片格比例从中心裁内接矩形后 4x4 拼接（每块等比、零变形）。
@@ -275,7 +340,6 @@ const EXPECT := {
 	"ui/card_frame.png": {"size": Vector2i(224, 288), "alpha": true},
 	"ui/card_frame_sel.png": {"size": Vector2i(224, 288), "alpha": true},
 	"ui/gold_plate.png": {"size": Vector2i(256, 64), "alpha": true},
-	"ui/spare_a.png": {"size": Vector2i(128, 128), "alpha": true},
 	"ui/button_normal.png": {"size": Vector2i(384, 128), "alpha": true},
 	"ui/button_hover.png": {"size": Vector2i(384, 128), "alpha": true},
 	"ui/button_pressed.png": {"size": Vector2i(384, 128), "alpha": true},
@@ -488,4 +552,6 @@ static func all_paths() -> Array[String]:
 		out.append(BG[k])
 	for k in WEAPON_BULLETS.keys():
 		out.append(WEAPON_BULLETS[k]["tex"])
+	for k in FX.keys():
+		out.append(FX[k]["tex"])
 	return out

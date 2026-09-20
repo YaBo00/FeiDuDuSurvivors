@@ -52,6 +52,9 @@ signal support_pulse(pos: Vector2, heal: bool)
 ## 台词气泡（2026-09-20）：放招/事件喊话。位置由发射方算好（头顶偏移），
 ## 文案来自 GameStats.ENEMY_TAUNTS；入场台词由 Battle 的可视检测直接驱动（不经本信号）。
 signal line_requested(pos: Vector2, text: String)
+## Boss 半血狂暴（2026-09-20）：身体闪烁由本节点自演（modulate 脉冲），
+## 震屏 / 屏幕中央大字 / 音效属战场反馈，走信号交 Battle 转发（模块不持 camera/feedback）。
+signal rage_requested(pos: Vector2)
 
 # ---- Boss 特殊技能状态机（2026-09-19 批次三）----
 ## 状态：chase（慢速追击，攒冷却）→ windup（前摇：站住 + 视觉预警）→
@@ -97,6 +100,10 @@ var _temp_speed_t := 0.0
 var taunt_done := false
 var died_exploded := false
 var _monitor_line_done := false
+## Boss 半血狂暴（2026-09-20）：_rage_triggered = 本场已触发过（一次性）；
+## _rage_flash_t = 红色脉冲剩余秒数（>0 期间 modulate 周期闪烁）。
+var _rage_triggered := false
+var _rage_flash_t := 0.0
 
 ## 逐帧动画速度。[PLACEHOLDER] 未 playtest。
 const IDLE_FPS := 6.0
@@ -156,6 +163,13 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	taunt_done = false
 	died_exploded = false
 	_monitor_line_done = false
+	# Boss 半血狂暴复位（复用实例/重复 setup 不带旧状态）
+	_rage_triggered = false
+	_rage_flash_t = 0.0
+	# 复用实例/重复 setup 的复位收尾（审查 P2）：last_hit_crit 残留 true 会让
+	# 下一只复用实例的死亡误触发暴击 hit-stop；_hit_flash 残留会让新怪凭空闪白。
+	last_hit_crit = false
+	_hit_flash = 0.0
 	# 远程怪射击计时器
 	_fire_timer = GameStats.RANGED_FIRE_INTERVAL * randf_range(0.6, 1.0)
 	position = pos
@@ -219,6 +233,17 @@ func _physics_process(delta: float) -> void:
 		if _use_sprite:
 			# 精灵接上后，受击闪白走 modulate（改颜色不需要重绘）
 			sprite.modulate = Color(1, 1, 1).lerp(Color(2.2, 2.2, 2.2), _hit_flash)
+		else:
+			queue_redraw()
+	elif _rage_flash_t > 0.0:
+		# Boss 狂暴红色脉冲（2026-09-20）：正弦明暗闪烁，到期恢复原色。
+		# 与受击闪白共用 modulate 通道 → hit_flash 优先（狂暴期间挨打瞬间闪白）。
+		_rage_flash_t = maxf(0.0, _rage_flash_t - delta)
+		var pulse := 0.5 + 0.5 * sin(_rage_flash_t * 14.0)
+		if _use_sprite:
+			sprite.modulate = Color(1, 1, 1).lerp(Color(1.9, 0.4, 0.4), pulse)
+			if _rage_flash_t <= 0.0:
+				sprite.modulate = Color(1, 1, 1)
 		else:
 			queue_redraw()
 	# 临时移速衰减（班长光环 / BossPUA 群体 PUA）：到期回 1.0
@@ -402,14 +427,18 @@ func _charger_brain(delta: float, to_target: Vector2, d: float) -> void:
 				_charger_t = GameStats.CHARGER_DASH_TIME
 				sfx_requested.emit("charger_dash", -6.0, 1.0)
 		"dash":
-			var intended: Vector2 = global_position + _charger_dir \
-				* (speed * GameStats.CHARGER_DASH_SPEED_MUL) * delta
-			# 撞墙检测：预演一次建筑推出，位置被拽回 = 这一步撞墙 → 立即进硬直
-			if _resolve_obstacles(intended) != intended:
+			var step := speed * GameStats.CHARGER_DASH_SPEED_MUL * delta
+			var intended: Vector2 = global_position + _charger_dir * step
+			# 撞墙检测：预演一次建筑推出，比较【被推出的位移量】与本次步长（审查 P2）。
+			# 旧实现用 Vector2 精确相等 —— 擦过建筑角被推出 0.001px 也判撞墙，
+			# 贴角冲锋会莫名收势。阈值取步长一半：正面撞墙整步被吃掉必超阈，
+			# 亚像素剐蹭不触发；阈值随 delta 缩放，帧率无关。
+			var resolved := _resolve_obstacles(intended)
+			global_position = resolved
+			if resolved.distance_to(intended) > step * 0.5:
 				charger_state = "recover"
 				_charger_t = GameStats.CHARGER_RECOVER_TIME
 				return
-			global_position = intended
 			_charger_t = maxf(0.0, _charger_t - delta)
 			# 撞到玩家（接触伤害由统一接触系统结算）也立即收势
 			if d <= radius + Player.RADIUS + 4.0 or _charger_t <= 0.0:
@@ -534,6 +563,13 @@ func take_damage(amount: int) -> bool:
 		return false
 	hp -= amount
 	_hit_flash = 1.0
+	# Boss 半血狂暴（2026-09-20）：一次性触发。hp > 0 保证濒死一击不触发
+	#（都死了就谈不上狂暴）；闪烁在本节点自演，战场反馈走信号交 Battle。
+	if behavior == "boss" and not _rage_triggered and hp > 0 \
+			and hp_ratio() <= GameStats.BOSS_RAGE_HP_RATIO:
+		_rage_triggered = true
+		_rage_flash_t = GameStats.BOSS_RAGE_FLASH_TIME
+		rage_requested.emit(global_position)
 	# 精灵态时 _draw 第一行就 return，重绘是纯浪费（对照 Player / Pickup 的守卫）
 	# 有头顶血条的（精英/Boss）即使走精灵渲染也要重绘，血条才会动
 	if not _use_sprite or show_health_bar:
@@ -575,6 +611,11 @@ func _draw() -> void:
 	draw_arc(Vector2.ZERO, radius, 0.0, TAU, 24, Color(1, 1, 1, 0.5), 1.0, true)
 	if _hit_flash > 0.0:
 		draw_circle(Vector2.ZERO, radius * 1.1, Color(1, 1, 1, 0.35 * _hit_flash))
+	elif _rage_flash_t > 0.0:
+		# 图元占位态的狂暴视觉：红色脉冲圈（精灵态走 modulate，见 _physics_process）
+		var pulse := 0.5 + 0.5 * sin(_rage_flash_t * 14.0)
+		draw_circle(Vector2.ZERO, radius * (1.25 + 0.15 * pulse),
+			Color(0.95, 0.2, 0.2, 0.22 + 0.3 * pulse))
 
 
 ## Boss 前摇预警：圆形收拢弧 +（冲锋时）指向锁定方向的指示条与远端落点圈。

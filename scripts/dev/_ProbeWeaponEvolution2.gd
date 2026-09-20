@@ -10,6 +10,8 @@ extends SceneTree
 ##   F. kangaroo「残影连拳」：attack_interval 按 rate_mul+0.35 收紧
 ##   H. weapon_mastery 升级链：第 6 层触发进化（apply_upgrade 集成路径）
 ##   G. potato「爆裂薯块」：aoe 字段接线 + 溅射只打圈内其他敌人 + 逐弹去重不重复扣血
+##   I. 进化弹道视觉（2026-09-20 美术回投）：*_evo 键 + 进化态优先 / 未登记回落 + 新星环
+##   J. 弹道数无上限 + 扇面封顶压缩（2026-09-20 用户需求）：5 条旧行为不变 / 8·12 条压缩间隔
 ##
 ## 冻结手法（与 _ProbePierce 同源）：start_run() 后把 state 冻在 UPGRADE，
 ## 玩家/敌人 set_physics_process(false)，弹道只由本探针手动 process_projectiles 驱动；
@@ -68,6 +70,8 @@ func _run_all() -> void:
 	_test_kangaroo_rate(p)
 	_test_upgrade_chain(p)
 	_test_potato_splash(p)
+	_test_proj_spread(p)
+	_test_evo_visuals(p)
 	_finish(true, "")
 
 
@@ -309,6 +313,112 @@ func _test_potato_splash(p: Node2D) -> void:
 	battle.enemies.clear()
 	battle.combat.clear_grid()
 	_clear_projectiles()
+
+
+## I. 进化弹道视觉（2026-09-20 美术回投）：*_evo 键 + 进化态优先 / 未登记回落 + 新星环
+func _test_evo_visuals(p: Node2D) -> void:
+	# ---- I1: 6 个 _evo 键全部登记且贴图可用
+	for cid in ["basic", "study", "finance", "sad", "potato", "kangaroo"]:
+		var ev: Dictionary = AssetDB.weapon_bullet(String(cid) + "_evo")
+		_check(not ev.is_empty() and ev.get("texture", null) != null,
+			"I1: %s_evo 弹道已登记且贴图可用" % cid)
+	# ---- I2/I3: 未进化走基础弹、进化走 evo 弹（端到端 on_player_fired）
+	p.apply_character("basic")
+	p.weapon_level = 0
+	p.weapon_evolved = false
+	p.recalc_stats()
+	battle.combat.on_player_fired(p.global_position + Vector2(100.0, 0.0), 1)
+	var pr0: Projectile = battle.projectiles[battle.projectiles.size() - 1]
+	var base_expect: Texture2D = AssetDB.weapon_bullet("basic")["texture"]
+	_check(pr0.bullet_tex == base_expect, "I2: 未进化弹道贴图 = 基础金珠")
+	_clear_projectiles()
+	p.weapon_evolved = true
+	p.recalc_stats()
+	battle.combat.on_player_fired(p.global_position + Vector2(100.0, 0.0), 1)
+	var pr1: Projectile = battle.projectiles[battle.projectiles.size() - 1]
+	var evo_expect: Texture2D = AssetDB.weapon_bullet("basic_evo")["texture"]
+	_check(pr1.bullet_tex == evo_expect, "I3: 进化弹道贴图 = 连珠·二重奏（basic_evo）")
+	_clear_projectiles()
+	# ---- I4: 未登记 evo 键返回空字典（回落路径可依赖）
+	_check(AssetDB.weapon_bullet("nonexistent_evo").is_empty(),
+		"I4: 未登记 evo 键返回空字典（回落基础弹）")
+	# ---- I5: 新星环特效登记
+	_check(AssetDB.fx_tex("evo_nova") != null, "I5: 进化新星环贴图已登记可用")
+
+
+# ================================================================ J. 弹道数无上限 + 扇面封顶压缩
+## 用户需求（2026-09-20）：弹道不设上限（删 MAX_PROJ）；扇面达到 MAX_PROJ_SPREAD 后
+## 不再变宽，改为压缩每条弹道之间的间隔角。独立验证：直接读发射出的弹道 velocity 方向。
+func _test_proj_spread(p: Node2D) -> void:
+	print("[PROBE] --- J. 弹道数无上限 + 扇面封顶压缩 ---")
+	var spread := _stat_const("MAX_PROJ_SPREAD", 1.2)
+	var per := _stat_const("PROJ_SPREAD", 0.3)
+	_check(spread > per, "J0: MAX_PROJ_SPREAD(%.2f) > PROJ_SPREAD(%.2f)" % [spread, per])
+
+	# J1 旧行为逐位不变：5 条 = 每发 0.3、总扇面 1.2
+	var ang5 := _fire_and_angles(p, 5)
+	_check(ang5.size() == 5, "J1a: proj=5 发射 5 条（实际 %d）" % ang5.size())
+	if ang5.size() == 5:
+		_check(_approx(ang5[1] - ang5[0], per),
+			"J1b: 5 条间隔仍为 PROJ_SPREAD=%.3f（实际 %.4f）" % [per, ang5[1] - ang5[0]])
+		_check(_approx(ang5[4] - ang5[0], spread),
+			"J1c: 5 条总扇面 = %.2f（旧行为）" % spread)
+
+	# J2 超界压缩：8 条 → 间隔 = MAX_PROJ_SPREAD/7，总扇面仍封顶
+	var ang8 := _fire_and_angles(p, 8)
+	_check(ang8.size() == 8, "J2a: proj=8 发射 8 条（无上限生效，实际 %d）" % ang8.size())
+	if ang8.size() == 8:
+		var want8 := spread / 7.0
+		_check(_approx(ang8[1] - ang8[0], want8),
+			"J2b: 8 条间隔压缩为 %.4f（实际 %.4f）" % [want8, ang8[1] - ang8[0]])
+		_check(_approx(ang8[7] - ang8[0], spread),
+			"J2c: 8 条总扇面仍封顶 %.2f（未再变宽）" % spread)
+
+	# J3 更多：12 条按 11 份继续压缩
+	var ang12 := _fire_and_angles(p, 12)
+	_check(ang12.size() == 12, "J3a: proj=12 发射 12 条（实际 %d）" % ang12.size())
+	if ang12.size() == 12:
+		_check(_approx(ang12[11] - ang12[0], spread),
+			"J3b: 12 条总扇面仍 %.2f" % spread)
+		_check(_approx(ang12[1] - ang12[0], spread / 11.0),
+			"J3c: 12 条间隔 %.4f" % (spread / 11.0))
+
+	# J4 去钳制：旧上限 5 不再是天花板
+	var pv = p
+	pv._bonus["proj"] = 10.0
+	pv.recalc_stats()
+	_check(int(pv.proj) >= 11, "J4: 弹道数可超前旧上限 5（加成 +10 → proj=%d）" % int(pv.proj))
+	pv._bonus["proj"] = 0.0
+	pv.recalc_stats()
+
+
+## 发射 n 条弹道并回传方向角（升序）。读实际 velocity 方向，不碰内部角度缓存。
+## 走真实链路：设 _bonus → recalc → 用 player.proj 当 count 传给 on_player_fired
+## （Player.fired 信号传的就是 proj；若 recalc 里还有旧钳制，count 会被卡住 → 断言能捕获）。
+func _fire_and_angles(p: Node2D, n: int) -> Array:
+	var pv = p
+	pv.weapon_evolved = false
+	pv.weapon_level = 0
+	pv._bonus["proj"] = float(n) - float(pv._base["proj"])
+	pv.recalc_stats()
+	var cnt: int = int(pv.proj)
+	_clear_projectiles()
+	battle.combat.on_player_fired(p.global_position + Vector2(100.0, 0.0), cnt)
+	var angs: Array = []
+	for pr in battle.projectiles:
+		angs.append(pr.velocity.angle())
+	angs.sort()
+	_clear_projectiles()
+	pv._bonus["proj"] = 0.0
+	pv.recalc_stats()
+	return angs
+
+
+## 读 Stats 脚本常量（契约可能后落地，缺失时用 fallback 不炸）。
+func _stat_const(name: String, fallback: float) -> float:
+	var s: GDScript = load("res://scripts/data/Stats.gd")
+	var m: Dictionary = s.get_script_constant_map()
+	return float(m.get(name, fallback))
 
 
 # ================================================================ 公用
