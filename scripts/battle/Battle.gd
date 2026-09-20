@@ -629,8 +629,9 @@ func _on_support_pulse(pos: Vector2, heal: bool) -> void:
 				best_ratio = r
 				best = e
 		if best != null and best_ratio < 1.0:
-			best.hp = minf(float(best.max_hp),
-				best.hp + float(best.max_hp) * GameStats.SUPPORT_HEAL_RATIO)
+			# 5% max_hp，至少 1 点 —— Enemy.hp 是 int，纯小数治疗会被截断吞掉
+			var amount := int(maxf(1.0, float(best.max_hp) * GameStats.SUPPORT_HEAL_RATIO))
+			best.hp = mini(int(best.max_hp), int(best.hp) + amount)
 			if best.show_health_bar:
 				best.queue_redraw()
 	else:
