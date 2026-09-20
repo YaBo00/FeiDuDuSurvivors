@@ -73,6 +73,7 @@ func _run_all() -> void:
 	_test_support(p)
 	_test_boss_pua(p)
 	_test_temp_speed()
+	_test_taunts(p)
 	_finish("")
 
 
@@ -273,6 +274,69 @@ func _test_temp_speed() -> void:
 		"G1: 双来源取 max 倍率 / max 时长")
 	_step_sec(e, 2.0 + DT)
 	_check(_f(float(e.temp_speed_mul)) == 1.0, "G2: 全部到期后回 1.0")
+	_cleanup_test_enemies()
+
+
+# ================================================================ H. 台词气泡
+func _test_taunts(p: Node2D) -> void:
+	# 表查询与「杂鱼安静」策略
+	_check(GameStats.enemy_taunt("Ox", "spawn") == "牛来~", "T1: Ox 入场台词 = 牛来~")
+	_check(GameStats.enemy_taunt("Ox", "death") == "妈--妈--", "T2: Ox 死亡台词 = 妈--妈--")
+	_check(GameStats.enemy_taunt("Slime", "spawn") == ""
+		and GameStats.enemy_taunt("Rat", "death") == ""
+		and GameStats.enemy_taunt("Student", "spawn") == "",
+		"T3: 杂鱼怪保持安静（防满场刷屏）")
+	_check(GameStats.enemy_skill_taunt("Charger", "windup") != ""
+		and GameStats.enemy_skill_taunt("BossPUA", "summon") != "",
+		"T4: 放招台词登记（卷王前摇 / BossPUA 召唤）")
+	# 入场气泡：敌人摆进视野 → 手动跑一次可视检测 → taunt_done。
+	# 在 225px 外生成（避开防贴脸重定位的随机角度），再确定性摆到视野内 100px。
+	var ox := _make_frozen("Ox", p.global_position + Vector2(260.0, 0.0))
+	ox.global_position = p.global_position + Vector2(100.0, 0.0)
+	var n0: int = int(battle.taunt_lines_shown)
+	battle._tick_enemy_taunts()
+	_check(bool(ox.taunt_done), "T5: 进视野后 taunt_done 置位")
+	_check(int(battle.taunt_lines_shown) == n0 + 1, "T6: 入场台词气泡已入池（+%d）" % (int(battle.taunt_lines_shown) - n0))
+	battle._tick_enemy_taunts()
+	_check(int(battle.taunt_lines_shown) == n0 + 1, "T7: 同一只只说一次")
+	# 击杀台词：浮字信号捕获（cleanup_enemies 发出）
+	var lines := []
+	battle.combat.float_requested.connect(func(pos: Vector2, text: String, _c: Color, _b: bool) -> void:
+		lines.append(String(text)))
+	ox.take_damage(99999)
+	battle.combat.cleanup_enemies()
+	var found := false
+	for t in lines:
+		if String(t) == "妈--妈--":
+			found = true
+	_check(found, "T8: 击杀牛马冒出「妈--妈--」")
+	_cleanup_test_enemies()
+	# 自爆死亡不喊击杀台词（班味炸弹 died_exploded 压制）
+	var b := _make_frozen("Bomber", p.global_position + Vector2(260.0, 0.0))
+	b.global_position = p.global_position + Vector2(60.0, 0.0)
+	var lines2 := []
+	battle.combat.float_requested.connect(func(pos: Vector2, text: String, _c: Color, _b2: bool) -> void:
+		lines2.append(String(text)))
+	_step(b, 1)
+	_step_until_dead(b, 200)
+	battle.combat.cleanup_enemies()
+	var found2 := false
+	for t in lines2:
+		if String(t) == "……没炸成":
+			found2 = true
+	_check(not found2, "T9: 自爆死亡不喊「……没炸成」")
+	_cleanup_test_enemies()
+	# 放招喊话：卷王前摇 → line_requested 真链路信号
+	var ch := _make_frozen("Charger", p.global_position + Vector2(240.0, 0.0))
+	var lines3 := []
+	ch.line_requested.connect(func(pos: Vector2, text: String) -> void:
+		lines3.append(String(text)))
+	_step(ch, 1)
+	var found3 := false
+	for t in lines3:
+		if String(t) == "卷起来！！":
+			found3 = true
+	_check(found3, "T10: 卷王前摇喊「卷起来！！」")
 	_cleanup_test_enemies()
 
 

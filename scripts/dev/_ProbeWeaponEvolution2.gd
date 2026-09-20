@@ -195,18 +195,39 @@ func _test_kangaroo_rate(p: Node2D) -> void:
 
 
 ## H. weapon_mastery 升级链：第 6 层触发进化（apply_upgrade 集成路径）
+##    + 2026-09-20 每层即时攻击 +3 与选卡进度注入
 func _test_upgrade_chain(p: Node2D) -> void:
 	p.apply_character("basic")
 	p.weapon_level = 0
 	p.weapon_evolved = false
 	p.recalc_stats()
+	var atk0: int = int(p.atk)
+	# H0: 选项携带进化进度（波末保底必含武器精通 → 直接生成选项断言）
+	battle._current_reason = "wave"
+	battle._generate_options()
+	var prog_found := false
+	var prog_val := -1
+	var disp_ok := false
+	for o in battle._current_options:
+		if String(o.get("id", "")) == "weapon_mastery":
+			prog_found = bool(o.has("mastery_progress"))
+			prog_val = int(o.get("mastery_progress", -1))
+			disp_ok = GameStats.upgrade_display(o, 1) == "+3"
+			break
+	_check(prog_found and prog_val == 0,
+		"H0: 武器精通卡携带进化进度 0/6（实际 %s/%d）" % [str(prog_found), prog_val])
+	_check(disp_ok, "H0b: 卡面效果显示 +3（每层即时攻击）")
 	for i in 5:
 		p.apply_upgrade("weapon_mastery", 0.0)
 	_check(p.weapon_level == 5 and not p.weapon_evolved,
 		"H1: 5 层未进化（level=%d evolved=%s）" % [p.weapon_level, str(p.weapon_evolved)])
+	_check(int(p.atk) == atk0 + 15,
+		"H1b: 每层即时攻击 +3（atk %d = %d + 15）" % [int(p.atk), atk0])
 	p.apply_upgrade("weapon_mastery", 0.0)
 	_check(p.weapon_level == 6 and p.weapon_evolved,
 		"H2: 第 6 层触发进化（level=%d evolved=%s）" % [p.weapon_level, str(p.weapon_evolved)])
+	_check(int(p.atk) == atk0 + 18,
+		"H2b: 6 层累计 +18 攻击（atk %d）" % int(p.atk))
 	var form: Dictionary = p.weapon_form()
 	_check(String(form.get("name", "")) == "连珠·二重奏" and int(form.get("shots", 0)) == 1,
 		"H3: 进化后 weapon_form() 返回连珠·二重奏形态")

@@ -332,6 +332,13 @@ func cleanup_enemies() -> void:
 			# 死亡爆裂：精英/大怪更大更亮；暴击收掉的最后一下给个短暂 hit-stop
 			burst_requested.emit(e.global_position, e.body_color, e.type_name != "Slime")
 			sfx_requested.emit("kill", -6.0, 1.0)
+			# 击杀台词（2026-09-20）：有身份的敌人被击杀时冒泡告别。
+			# 班味炸弹【自爆】死亡不算被击杀（died_exploded），不喊「……没炸成」。
+			if not e.died_exploded:
+				var death_line := GameStats.enemy_taunt(String(e.type_name), "death")
+				if death_line != "":
+					float_requested.emit(e.global_position + Vector2(0.0, -e.radius * 2.4),
+						death_line, Color(1.0, 0.55, 0.45), false)
 			if e.last_hit_crit:
 				hitstop_requested.emit()
 			e.queue_free()

@@ -304,10 +304,13 @@ func apply_upgrade(id: String, value: float) -> void:
 		"proj":
 			_bonus["proj"] += 1.0
 		"weapon_mastery":
-			# 武器进化·本期切片（B2 迭代）：武器精通不走 _bonus（它是层数计数不是属性加成），
+			# 武器进化（B2 迭代）：武器精通不走 _bonus 的层数部分（它是层数计数不是属性加成），
 			# 满 WEAPON_EVOLVE_LEVEL 层 → evolved ⇒ 出膛伤害 × WEAPON_EVOLVE_DMG_MUL，
 			# 并解锁第二形态（WEAPON_EVOLUTIONS 形态特性，2026-09-20）。
+			# 2026-09-20 可见性/即时收益：每层附赠攻击 +3（走 _bonus 幂等加法，
+			# 低于最普通的攻击卡 +5 —— 叠层期有点小甜头，质变仍在满层）。
 			weapon_level += 1
+			_bonus["atk"] += GameStats.WEAPON_MASTERY_STACK_ATK
 			if weapon_level >= GameStats.WEAPON_EVOLVE_LEVEL and not weapon_evolved:
 				weapon_evolved = true
 				recalc_stats()   # 形态特性可能带 rate_add（攻速倍率）→ 立刻刷新攻击间隔

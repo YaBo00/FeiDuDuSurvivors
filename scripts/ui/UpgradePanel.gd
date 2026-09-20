@@ -138,9 +138,12 @@ func show_options(options: Array, wave_num: int, reason_text: String, on_choice:
 			b.text = ""
 			# 正面 buff（名称 + 效果预览）在上；负面「敌人代价」独立一行、红色（2026-09-20）。
 			# 预览同时给出累计效果 —— 取这张卡后敌人累计变强多少，玩家才能做真正的交易判断。
-			_labels[i].text = "%d. %s\n%s" % [
-				i + 1, opt["name"], GameStats.upgrade_display(opt, wave_num),
-			]
+			var display_text := GameStats.upgrade_display(opt, wave_num)
+			# 武器精通卡携带进化进度（Battle._generate_options 注入，2026-09-20 用户需求）
+			if opt.has("mastery_progress"):
+				display_text += "　·　进化进度 %d/%d" % [
+					int(opt["mastery_progress"]), GameStats.WEAPON_EVOLVE_LEVEL]
+			_labels[i].text = "%d. %s\n%s" % [i + 1, opt["name"], display_text]
 			var cost_label: Label = _cost_labels[i]
 			if opt.has("cost"):
 				var c: Dictionary = opt["cost"]
