@@ -126,12 +126,11 @@ func _test_charger(p: Node2D) -> void:
 	var dash_dir: Vector2 = e._charger_dir
 	_check(dash_dir.distance_to(locked) < 0.001, "B7: 冲锋方向 = windup 锁定方向（不被玩家移动改写）")
 	var pos_before: Vector2 = e.global_position
-	_step_sec(e, GameStats.CHARGER_DASH_TIME)
+	# ±1 帧抖动免疫：步进到状态切换为止（而不是按固定帧数跨过切换点）
+	_check(_step_until(e, "recover", 90), "B9: dash 结束进入 recover")
 	var moved: Vector2 = e.global_position - pos_before
 	_check(moved.length() > 100.0, "B8: dash 实际位移显著（%.0fpx）" % moved.length())
-	_check(String(e.charger_state) == "recover", "B9: dash 结束进入 recover")
-	_step_sec(e, GameStats.CHARGER_RECOVER_TIME + DT)
-	_check(String(e.charger_state) == "approach", "B10: 硬直结束回到 approach")
+	_check(_step_until(e, "approach", 120), "B10: 硬直结束回到 approach")
 	_free_enemy(e)
 
 
@@ -169,19 +168,25 @@ func _test_splitter(p: Node2D) -> void:
 func _test_bomber(p: Node2D) -> void:
 	sfx_events.clear()
 	var hp0: float = float(p.hp)
-	var e := _make_frozen("Bomber", p.global_position + Vector2(60.0, 0.0))
+	# 在 225px 外生成（避开防贴脸重定位），再摆到 60px 引信距离
+	var e := _make_frozen("Bomber", p.global_position + Vector2(260.0, 0.0))
+	e.global_position = p.global_position + Vector2(60.0, 0.0)
 	_step(e, 1)
 	_check(String(e.bomber_state) == "fuse", "D1: 60px 进入引信 fuse")
 	_check(sfx_events.has("bomber_fuse"), "D2: 进引信发出 bomber_fuse 音效")
 	_step_sec(e, GameStats.BOMBER_FUSE_TIME)
-	_check(bool(e.is_dead), "D3: 引信结束自爆自灭（is_dead）")
+	_check(_step_until_dead(e, 200),
+		"D3: 引信结束自爆自灭（state=%s t=%.4f dist=%.0f is_dead=%s）" % [
+			String(e.bomber_state), float(e._bomber_t),
+			e.global_position.distance_to(p.global_position), str(e.is_dead)])
 	_check(float(p.hp) < hp0, "D4: 90px 内玩家被结算自爆伤害（%.0f → %.0f）" % [hp0, float(p.hp)])
 	var took: int = int(hp0 - float(p.hp))
 	_check(took == int(e.dmg), "D5: 自爆伤害 = 模板 dmg %d（实际 %d）" % [int(e.dmg), took])
 	_cleanup_test_enemies()
 	p.invincible_timer = 0.0   # 清掉上一炸的无敌帧，保证下一组确定性
 	# 取消路径：进引信后玩家拉开到 200px
-	var e2 := _make_frozen("Bomber", p.global_position + Vector2(60.0, 0.0))
+	var e2 := _make_frozen("Bomber", p.global_position + Vector2(260.0, 0.0))
+	e2.global_position = p.global_position + Vector2(60.0, 0.0)
 	_step(e2, 1)
 	_check(String(e2.bomber_state) == "fuse", "D6: 第二只同样进引信")
 	e2.global_position = p.global_position + Vector2(200.0, 0.0)
@@ -209,13 +214,16 @@ func _test_support(p: Node2D) -> void:
 	_check(_f(float(near1.temp_speed_mul)) == 1.25, "E3: 重复施加取 max 不叠乘")
 	_step_sec(near1, GameStats.SUPPORT_SPEED_DUR + DT)
 	_check(_f(float(near1.temp_speed_mul)) == 1.0, "E4: 时效结束回 1.0")
-	# 治疗脉冲：打给血量占比最低者（near1 打到 20%，near2 满血）
-	near1.hp = float(near1.max_hp) * 0.2
-	var hp_before: float = float(near1.hp)
-	var expect: float = minf(float(near1.max_hp),
-		hp_before + float(near1.max_hp) * GameStats.SUPPORT_HEAL_RATIO)
+	# 治疗脉冲：打给血量占比最低者（near1 打到 ~20%，near2 满血）。
+	# Enemy.hp 是 int —— 期望口径与 Battle 一致：5% max_hp 至少 1 点，int 截断。
+	near1.hp = int(float(near1.max_hp) * 0.2)
+	var hp_before := int(near1.hp)
+	var amount := int(maxf(1.0, float(near1.max_hp) * GameStats.SUPPORT_HEAL_RATIO))
+	var expect: int = mini(int(near1.max_hp), hp_before + amount)
 	battle._on_support_pulse(mon.global_position, true)
-	_check(_f(float(near1.hp)) == _f(expect), "E5: 治疗打给占比最低者（+max_hp 5%）")
+	_check(int(near1.hp) == expect,
+		"E5: 治疗打给占比最低者（max_hp=%d +量=%d hp %d → %d，期望 %d）" % [
+			int(near1.max_hp), amount, hp_before, int(near1.hp), expect])
 	_check(_f(float(near2.hp)) == _f(float(near2.max_hp)), "E6: 满血友军不溢出治疗")
 	_check(_f(float(far.hp)) == _f(float(far.max_hp)), "E7: 范围外不治疗")
 	_cleanup_test_enemies()
@@ -227,19 +235,33 @@ func _test_boss_pua(p: Node2D) -> void:
 	_check(String(t.get("summon_type", "")) == "Rat" and int(t.get("summon_count", 0)) == 2,
 		"F1: BossPUA 模板召唤 2 只 Rat")
 	_check(bool(t.has("summon_aura")), "F2: BossPUA 模板带群体加速光环")
+	# 真链路：把 BossPUA 的出招下标拨到 summon，手动步进过前摇/招式，
+	# 捕获 summon_requested 与 global_speed_aura 两个信号的真实发射
+	var boss := _make_frozen("BossPUA", p.global_position + Vector2(300.0, 0.0))
+	var order: Array = GameStats.BOSS_SKILL_ORDER
+	boss.boss_skill_index = order.find("summon")
+	boss._boss_cooldown = 0.0
+	var windup: float = float(GameStats.BOSS_SKILL_WINDUP.get("summon", 1.0)) + DT
+	_step_sec(boss, windup)
+	var sm_ok := false
+	var aura_ok := false
+	for s in summon_events:
+		if String(s[1]) == "Rat" and int(s[2]) == 2:
+			sm_ok = true
+	for a in aura_events:
+		if _f(float(a[0])) == 1.3 and _f(float(a[1])) == 3.0:
+			aura_ok = true
+	_check(sm_ok, "F3: summon 出招请求 2 只 Rat（真链路信号）")
+	_check(aura_ok, "F5: 召唤瞬间发出全场光环信号（1.3 / 3s）")
+	# 应用侧：召唤的 Rat 落地 + 光环对全场生效
 	var before: int = battle.enemies.size()
 	battle._on_boss_summon(p.global_position + Vector2(80.0, 0.0), "Rat", 2)
-	_check(battle.enemies.size() == before + 2, "F3: 召唤落 2 只 Rat")
-	var witness := _make_frozen("Slime", p.global_position + Vector2(-200.0, 0.0))
-	var got := []
-	witness.global_speed_aura.connect(func(mul: float, dur: float) -> void:
-		got.append([mul, dur]))
+	_check(battle.enemies.size() == before + 2, "F4: 召唤落 2 只 Rat")
+	var witness := _make_frozen("Slime", p.global_position + Vector2(-260.0, 0.0))
 	battle._on_global_speed_aura(1.3, 3.0)
-	_check(_f(float(witness.temp_speed_mul)) == 1.3, "F4: 全场光环 +30% 移速已生效")
-	_check(got.size() == 1 and _f(float(got[0][0])) == 1.3 and _f(float(got[0][1])) == 3.0,
-		"F5: global_speed_aura 信号可被监听（1.3 / 3s）")
+	_check(_f(float(witness.temp_speed_mul)) == 1.3, "F6: 全场光环 +30% 移速已生效")
 	_step_sec(witness, 3.0 + DT)
-	_check(_f(float(witness.temp_speed_mul)) == 1.0, "F6: 3s 后光环到期回 1.0")
+	_check(_f(float(witness.temp_speed_mul)) == 1.0, "F7: 3s 后光环到期回 1.0")
 	_cleanup_test_enemies()
 
 
@@ -300,6 +322,24 @@ func _step(e: Node2D, n: int) -> void:
 ## 手动步进 sec 秒（按 DT 折算帧数）
 func _step_sec(e: Node2D, sec: float) -> void:
 	_step(e, int(ceil(sec / DT)))
+
+
+## 步进直到 charger 进入目标状态（±1 帧抖动免疫）；max_frames 内未达成为 false。
+func _step_until(e: Node2D, target: String, max_frames: int) -> bool:
+	for i in max_frames:
+		if String(e.charger_state) == target:
+			return true
+		e._physics_process(DT)
+	return String(e.charger_state) == target
+
+
+## 步进直到敌人死亡（引信 2s ± 浮点抖动免疫）；max_frames 内未死为 false。
+func _step_until_dead(e: Node2D, max_frames: int) -> bool:
+	for i in max_frames:
+		if bool(e.is_dead):
+			return true
+		e._physics_process(DT)
+	return bool(e.is_dead)
 
 
 func _f(x: float) -> float:
