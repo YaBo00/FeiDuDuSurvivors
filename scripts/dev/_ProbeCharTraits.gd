@@ -199,7 +199,7 @@ func _t3_levelup_aspd() -> void:
 	_check(is_equal_approx(delta, expect),
 		"3 级累计攻速加成 = %.2f（期望 %.2f）" % [delta, expect])
 
-	# 对照：非学习豪升级不该动 aspd
+	# 对照：非学习嘉豪升级不该动 aspd
 	_reset_to("basic")
 	var b0: float = float(player._bonus["aspd"])
 	player.gain_xp(need)
@@ -229,7 +229,7 @@ func _t4_money_rush() -> void:
 	_check(player._money_stacks == 0, "超时后层数归零（实际 %d）" % player._money_stacks)
 	_check(is_equal_approx(player.money_speed_mul(), 1.0), "超时后移速乘区回到 1.0")
 
-	# 对照：非金融豪捡钱不加层
+	# 对照：非金融嘉豪捡钱不加层
 	_reset_to("basic")
 	player.add_gold(1)
 	_check(player._money_stacks == 0 and is_equal_approx(player.money_speed_mul(), 1.0),
@@ -693,7 +693,7 @@ func _reset_to(id: String) -> void:
 	player.set_physics_process(false)
 	# ⚠️ 两个必须归零的短路项，否则致死断言会 flaky / 恒假：
 	#   god_mode → take_hit 第一行就 return "iframe"，永远打不到死亡分支；
-	#   dodge    → 学习豪自带 5%，有 1/20 概率命中闪避分支返回 "dodge"。
+	#   dodge    → 学习嘉豪自带 5%，有 1/20 概率命中闪避分支返回 "dodge"。
 	player.god_mode = false
 	player.dodge = 0.0
 

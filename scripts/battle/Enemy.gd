@@ -105,6 +105,34 @@ var _monitor_line_done := false
 var _rage_triggered := false
 var _rage_flash_t := 0.0
 
+# ---- 副武器施加的减益（2026-09-22：冰霜新星冻结 / 环绕飞刃减速 / 毒云中毒）----
+# 全部是【运行时状态】，绝不写进模板或 Stats；到期自动复位（见 _tick_status）。
+## 冻结剩余秒数。>0 期间：不移动、不进入任何行为分支（Boss 三招状态机一并停摆）。
+## Boss 时长按 Stats.EXTRA_FREEZE_BOSS_MUL 打折 —— 三招前摇是设计底线，不能被无限冻住。
+var frozen_t := 0.0
+## 减速乘区（<1.0 = 变慢）与剩余时长。多来源取更慢的一侧、时长取更长的一侧。
+var _slow_mul := 1.0
+var _slow_t := 0.0
+## 中毒（易伤）乘区（>1.0 = 受击更痛）与剩余时长。伤害结算读 incoming_vuln_mul()。
+var _vuln_mul := 1.0
+var _vuln_t := 0.0
+
+# ---- 精英词缀（2026-09-22：精英生成时随机 roll 一个，见 GameStats.ELITE_AFFIXES）----
+## 词缀 id（"" = 无词缀：普通怪 / Boss / 召唤物）。**只影响精英**，不叠组合。
+var affix: String = ""
+## 受击伤害乘区（钢甲 = 0.5；无词缀恒 1.0）。消费点是 take_damage —— 全局唯一伤害
+## 入口，所以弹道 / 溅射 / 副武器 / 反甲反弹都自动吃到减伤，不需要各自改。
+var dmg_taken_mul := 1.0
+## 狂怒是否已进入狂暴（一次性。进入后移速 / 伤害切到狂暴乘区，不可逆）。
+var _enraged := false
+## 词缀底色（modulate 基线）。受击闪白 / 冻结冰蓝 / 狂暴脉冲结束后回落到它。
+var _affix_tint := Color(1, 1, 1)
+## 词缀计时（狂怒脉冲用）。只由 delta 推进 —— 与 Boss 状态机同一可测性接缝。
+var _affix_t := 0.0
+## 精英词缀的死亡效果（爆裂 / 召唤）：Enemy 不持有 player / enemies 数组（同 splitter
+## 的既有约定），位置与词缀交给 Battle 落地实现。
+signal affix_death_requested(pos: Vector2, affix: String)
+
 ## 逐帧动画速度。[PLACEHOLDER] 未 playtest。
 const IDLE_FPS := 6.0
 
@@ -122,7 +150,10 @@ var _hit_flash := 0.0
 ## 按波次缩放初始化。pos 为出生点。
 ## hp_cost / dmg_cost：波末升级捆绑的「敌人代价」累积乘区（A1 双向投票的敌人侧，
 ## 由 WaveDirector 从 Battle 传入；默认 1.0 = 无代价 —— 探针直调 setup 的旧路径零影响）。
-func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost := 1.0) -> void:
+## affix_id：精英词缀（WaveDirector 生成精英时 roll 并传入；普通怪 / Boss / 召唤物恒 ""）。
+## 默认空串 ⇒ 探针与旧调用路径（setup 少传参）行为逐位不变。
+func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost := 1.0,
+		affix_id := "") -> void:
 	type_name = p_type
 	var t := GameStats.enemy_template(p_type)
 	max_hp = roundi(float(t["hp"]) * GameStats.hp_scale(wave_num) * hp_cost)
@@ -136,6 +167,22 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	# 在商店做出来之前，升级是玩家唯一的成长途径，必须给够。
 	xp_value = gold * GameStats.XP_PER_GOLD
 	body_color = _color_for(p_type)
+	# ---- 精英词缀乘区（2026-09-22）----
+	# 复位 + 应用一次收口在这里：复用实例 / 重复 setup 不会把上一只怪的词缀带进来。
+	affix = affix_id
+	dmg_taken_mul = 1.0
+	_enraged = false
+	_affix_t = 0.0
+	_affix_tint = Color(1, 1, 1)
+	var ad := GameStats.elite_affix(affix)
+	if not ad.is_empty():
+		# 疾风：模板级移速乘区。写在这一行（speed 已赋值）——临时 buff（班长光环 /
+		# 副武器减速）是运行时乘区，在 _cur_speed() 里才相乘，两者互不污染。
+		speed *= float(ad.get("spd_mul", 1.0))
+		dmg_taken_mul = float(ad.get("dmg_taken_mul", 1.0))
+		# 底色：向词缀色混合（纯色会吃掉原画细节）。
+		_affix_tint = Color(1, 1, 1).lerp(GameStats.elite_affix_color(affix),
+			GameStats.AFFIX_TINT_MIX)
 	# A8：精英/Boss 才有头顶血条
 	show_health_bar = p_type in ["Elite", "Boss", "Ranged", "BossPUA"]
 	# 行为类型（melee / ranged / boss），从模板读
@@ -166,6 +213,12 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	# Boss 半血狂暴复位（复用实例/重复 setup 不带旧状态）
 	_rage_triggered = false
 	_rage_flash_t = 0.0
+	# 副武器减益复位（复用实例：上一只怪的冻结/减速/中毒绝不带给新怪）
+	frozen_t = 0.0
+	_slow_mul = 1.0
+	_slow_t = 0.0
+	_vuln_mul = 1.0
+	_vuln_t = 0.0
 	# 复用实例/重复 setup 的复位收尾（审查 P2）：last_hit_crit 残留 true 会让
 	# 下一只复用实例的死亡误触发暴击 hit-stop；_hit_flash 残留会让新怪凭空闪白。
 	last_hit_crit = false
@@ -246,11 +299,47 @@ func _physics_process(delta: float) -> void:
 				sprite.modulate = Color(1, 1, 1)
 		else:
 			queue_redraw()
+	elif affix != "":
+		# 精英词缀底色（2026-09-22）：无特效时的常态 modulate = 词缀色混合。
+		# 狂怒进入狂暴后改为「词缀色 ↔ 亮红」脉冲（周期 AFFIX_PULSE_PERIOD）——
+		# 只由 delta 推进（_affix_t），探针手动步进可复现。
+		_affix_t += delta
+		if _use_sprite:
+			if _enraged:
+				var p := 0.5 + 0.5 * sin(_affix_t * TAU / GameStats.AFFIX_PULSE_PERIOD)
+				sprite.modulate = _affix_tint.lerp(Color(2.0, 0.32, 0.32), p)
+			else:
+				sprite.modulate = _affix_tint
+		else:
+			queue_redraw()
 	# 临时移速衰减（班长光环 / BossPUA 群体 PUA）：到期回 1.0
 	if _temp_speed_t > 0.0:
 		_temp_speed_t = maxf(0.0, _temp_speed_t - delta)
 		if _temp_speed_t <= 0.0:
 			temp_speed_mul = 1.0
+	# ---- 副武器减益推进（2026-09-22）----
+	# ⚠️ 放在 target 判空【之前】：没有目标时减益计时照走，否则冻结中的怪一旦失去目标
+	# （换波清场 / 目标失效）就会留下永不消退的冰蓝视觉。
+	var was_frozen := frozen_t > 0.0
+	_tick_status(delta)
+	if was_frozen and frozen_t <= 0.0 and _use_sprite:
+		# 解冻复原（受击闪白 / 狂暴脉冲下一帧会自己再写）；有词缀的精英回落到词缀底色
+		sprite.modulate = _affix_tint if affix != "" else Color(1, 1, 1)
+	if frozen_t > 0.0:
+		# 冻结 = 站住不动、不出招：直接跳过全部行为分支（含 Boss 三招状态机、
+		# charger 冲刺、bomber 引信）。冰蓝覆盖表示「被冻住了」。
+		#
+		# ⚠️ 刻意【不】免疫接触伤害：接触伤害是「重叠即伤」的空间判定，不是敌人的主动攻击
+		# —— 冻住的怪贴在你身上照样磨血，这是本作一贯的模型（改动会动到既有难度曲线）。
+		if _use_sprite:
+			sprite.modulate = Color(0.62, 0.86, 1.45)
+		else:
+			queue_redraw()   # 图元态才需要重绘（精灵态走 modulate）
+		return
+	# 精英词缀推进（2026-09-22）：目前只有「狂怒」需要每帧盯血量占比（半血切乘区）。
+	# 有词缀才调用 ⇒ 满场普通怪一分钱不花。
+	if affix != "":
+		_tick_affix(delta)
 	if target == null or is_dead:
 		return
 	var to_target := target.global_position - global_position
@@ -290,9 +379,91 @@ func _physics_process(delta: float) -> void:
 	global_position = _resolve_obstacles(global_position)
 
 
-## 当前实际移速 = 模板速度 × 临时加速乘区（光环/群体 PUA）。
+## 当前实际移速 = 模板速度 × 临时加速乘区（光环/群体 PUA）× 减速乘区（副武器）。
 func _cur_speed() -> float:
-	return speed * temp_speed_mul
+	return speed * temp_speed_mul * _slow_mul
+
+
+# ================================================================ 精英词缀（2026-09-22）
+## 每帧检查（只有 affix == "enraged" 会真的做事）。
+##
+## 狂怒：血量占比首次低于 enrage_hp_ratio 时进入狂暴 —— 移速 ×1.6、伤害 ×1.5，
+## 并冒一句「狂暴！」气泡 + 底色转红脉冲。**一次性**：进入后不回头（哪怕被治疗回血），
+## 因为「压着打不掉血、一松手就爆种」才是这条词缀的读感。
+##
+## ⚠️ 直接改 speed / dmg 两个字段而不是加乘区字段：这两个字段是本节点对外的
+## 「模板级数值」，contact_damage / fired_enemy_proj / 反甲反弹都直接读它们 ——
+## 改字段 = 所有消费点自动生效，不会漏。
+func _tick_affix(_delta: float) -> void:
+	if _enraged or is_dead or hp <= 0 or affix != "enraged":
+		return
+	var ad := GameStats.elite_affix(affix)
+	if hp_ratio() > float(ad.get("enrage_hp_ratio", 0.3)):
+		return
+	_enraged = true
+	speed *= float(ad.get("enrage_spd_mul", 1.0))
+	dmg = maxi(1, roundi(float(dmg) * float(ad.get("enrage_dmg_mul", 1.0))))
+	# 反馈：气泡（表驱动，见 GameStats.ENEMY_TAUNTS）+ 音效。本节点不持 feedback/audio，
+	# 统一走既有信号交 Battle 转发。
+	var line := GameStats.enemy_skill_taunt(type_name, "enrage")
+	if line != "":
+		line_requested.emit(global_position + Vector2(0.0, -radius * 2.6), line)
+	sfx_requested.emit("kill", -3.0, 0.6)
+
+
+# ================================================================ 副武器减益（2026-09-22）
+## 倒计时推进 + 到期复位。只由 delta 驱动（与 Boss 状态机同一可测性接缝）。
+func _tick_status(delta: float) -> void:
+	if frozen_t > 0.0:
+		frozen_t = maxf(0.0, frozen_t - delta)
+	if _slow_t > 0.0:
+		_slow_t = maxf(0.0, _slow_t - delta)
+		if _slow_t <= 0.0:
+			_slow_mul = 1.0
+	if _vuln_t > 0.0:
+		_vuln_t = maxf(0.0, _vuln_t - delta)
+		if _vuln_t <= 0.0:
+			_vuln_mul = 1.0
+
+
+## 冻结（冰霜新星）。时长取更长的一侧刷新，不叠加。
+## Boss 打折：三招前摇是公平性底线，冻太久等于废掉 Boss。
+func freeze(dur: float) -> void:
+	if dur <= 0.0 or is_dead:
+		return
+	if behavior == "boss":
+		dur *= GameStats.EXTRA_FREEZE_BOSS_MUL
+	frozen_t = maxf(frozen_t, dur)
+	queue_redraw()
+
+
+## 减速（环绕飞刃 Lv5）。乘区取更慢的一侧、时长取更长的一侧；多来源不迭乘。
+## Boss 折扣：把乘区向 1.0 靠拢（效果减半），而不是免疫。
+func apply_slow(mul: float, dur: float) -> void:
+	if mul <= 0.0 or dur <= 0.0 or is_dead:
+		return
+	var m := clampf(mul, 0.05, 1.0)
+	if behavior == "boss":
+		m = lerpf(m, 1.0, 1.0 - GameStats.EXTRA_SLOW_BOSS_MUL)
+	_slow_mul = minf(_slow_mul, m)
+	_slow_t = maxf(_slow_t, dur)
+
+
+## 中毒 / 易伤（毒云 Lv5）：受击伤害乘区。取更高的易伤、时长取更长的一侧。
+func apply_vuln(mul: float, dur: float) -> void:
+	if mul <= 1.0 or dur <= 0.0 or is_dead:
+		return
+	_vuln_mul = maxf(_vuln_mul, mul)
+	_vuln_t = maxf(_vuln_t, dur)
+
+
+## 本怪当前的受击伤害乘区（无中毒恒 1.0）。伤害结算是【唯一】消费方。
+func incoming_vuln_mul() -> float:
+	return _vuln_mul if _vuln_t > 0.0 else 1.0
+
+
+func is_frozen() -> bool:
+	return frozen_t > 0.0
 
 
 # ================================================================ Boss 技能状态机
@@ -525,7 +696,11 @@ func apply_temp_speed(mul: float, dur: float) -> void:
 ## 把位置推出建筑物（圆-矩形）。
 ## 圆心在矩形外但与矩形距离小于半径 → 沿最近点方向推到贴边；
 ## 圆心已经在矩形内部（例如出生点被摆进去）→ 沿最近的一条边推出去。
+## 【2026-09-21 用户拍板：楼无碰撞】与 Obstacle.setup 的物理层清零配套 —— 这里是
+## 敌人侧的代码级推出（不经过物理层，必须一并关闭），否则会「玩家穿楼、敌人被楼
+## 弹开」观感分裂，且敌人仍会被墙+楼夹缝卡死。恢复实体楼 = 删掉 return pos 这行。
 func _resolve_obstacles(pos: Vector2) -> Vector2:
+	return pos
 	for r in obstacles:
 		if not r.grow(radius).has_point(pos):
 			continue
@@ -561,6 +736,11 @@ func take_damage(amount: int) -> bool:
 	# 这里再兜一层：非法（<=0）输入直接忽略，绝不写入 hp，从根部杜绝 NaN 血条。
 	if amount <= 0:
 		return false
+	# 钢甲词缀（2026-09-22）：受击伤害乘区在【唯一伤害入口】收口 —— 弹道 / 溅射 /
+	# 副武器 / 反甲反弹全部自动吃到减伤，各来源不需要知道词缀的存在。
+	# 至少留 1 点：减伤归减伤，不能让「打不动 = 永远打不死」这种情况成立。
+	if dmg_taken_mul != 1.0:
+		amount = maxi(1, roundi(float(amount) * dmg_taken_mul))
 	hp -= amount
 	_hit_flash = 1.0
 	# Boss 半血狂暴（2026-09-20）：一次性触发。hp > 0 保证濒死一击不触发
@@ -580,6 +760,10 @@ func take_damage(amount: int) -> bool:
 		# Rat 本身是 melee，天然不会「分裂→再分裂」套娃）
 		if behavior == "splitter":
 			split_requested.emit(global_position)
+		# 精英词缀死亡效果（2026-09-22）：爆裂 / 召唤 的实际结算在 Battle ——
+		# 本节点不持 player（AOE 要判距并走 take_hit）与 enemies 数组（召唤要入列）。
+		if affix != "":
+			affix_death_requested.emit(global_position, affix)
 		return true
 	return false
 
@@ -609,6 +793,15 @@ func _draw() -> void:
 		return
 	draw_circle(Vector2.ZERO, radius, body_color)
 	draw_arc(Vector2.ZERO, radius, 0.0, TAU, 24, Color(1, 1, 1, 0.5), 1.0, true)
+	# 精英词缀（图元占位态）：一圈词缀色外环。精灵态走 modulate（见 _physics_process），
+	# 图元态没有贴图可叠色，只能靠这个环表达「这只和别的不一样」。
+	if affix != "":
+		draw_arc(Vector2.ZERO, radius * 1.22, 0.0, TAU, 28,
+			Color(GameStats.elite_affix_color(affix), 0.85), 2.5, true)
+	# 冻结态（无精灵时的图元版）：冰蓝罩 + 亮边（精灵态走 modulate，见 _physics_process）
+	if frozen_t > 0.0:
+		draw_circle(Vector2.ZERO, radius * 1.12, Color(0.55, 0.85, 1.0, 0.42))
+		draw_arc(Vector2.ZERO, radius * 1.12, 0.0, TAU, 24, Color(0.85, 0.96, 1.0, 0.9), 2.0, true)
 	if _hit_flash > 0.0:
 		draw_circle(Vector2.ZERO, radius * 1.1, Color(1, 1, 1, 0.35 * _hit_flash))
 	elif _rage_flash_t > 0.0:

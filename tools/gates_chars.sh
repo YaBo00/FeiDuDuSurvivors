@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 六角色验收扫（设计契约 §8.1：--selftest --char <id> 六连跑全绿）。
 # 慢（每个角色约 100 秒真实时间）—— 里程碑跑，不要每次改代码都跑。
-# 日常改动请用 tools/run_gates.sh，其中 [15/17] 已覆盖忧郁豪这条最极端的武器路径。
+# 日常改动请用 tools/run_gates.sh，其中 [15/17] 已覆盖忧郁嘉豪这条最极端的武器路径。
 set -u
 
 GC="${GODOT_CONSOLE:-/c/111SoftWare/Godot/4.7.2-stable/Godot_v4.7.2-stable_win64_console.exe}"

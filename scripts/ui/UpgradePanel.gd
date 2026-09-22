@@ -18,8 +18,8 @@ var _cost_labels: Array[Label] = []
 
 ## 自动选择的延迟（面板自己的秒数）。与 Battle 旧的 UPGRADE_AUTO_DELAY 等价。
 const AUTO_SELECT_DELAY := 0.3
-## 卡片容量 = 基础张数 + 最大角色天赋加成（学习豪 +1）+ 预知未来额外选项（+1，2026-09-20）。
-## 旧版硬编码 3 张按钮：学习豪的第 4 张卡被静默吞掉（2026-09-20 全库审查 P1）。
+## 卡片容量 = 基础张数 + 最大角色天赋加成（学习嘉豪 +1）+ 预知未来额外选项（+1，2026-09-20）。
+## 旧版硬编码 3 张按钮：学习嘉豪的第 4 张卡被静默吞掉（2026-09-20 全库审查 P1）。
 ## show_options 本就按「有卡才显示、没卡就藏」工作，多建按钮零副作用。
 const BUTTON_COUNT := GameStats.UPGRADE_OPTIONS + 2
 
@@ -157,7 +157,10 @@ func show_options(options: Array, wave_num: int, reason_text: String, on_choice:
 			b.text = ""
 			# 正面 buff（名称 + 效果预览）在上；负面「敌人代价」独立一行、红色（2026-09-20）。
 			# 预览同时给出累计效果 —— 取这张卡后敌人累计变强多少，玩家才能做真正的交易判断。
-			var display_text := GameStats.upgrade_display(opt, wave_num)
+			# 副武器卡（2026-09-22）自带 display：它说的是「获得/升到 LvN + 参数」，
+			# 不是普通卡那种「+N」格式，用通用格式化会显示成「+0」。
+			var display_text: String = String(opt["display"]) if opt.has("display") \
+				else GameStats.upgrade_display(opt, wave_num)
 			# 武器精通卡携带进化进度（Battle._generate_options 注入，2026-09-20 用户需求）
 			if opt.has("mastery_progress"):
 				display_text += "　·　进化进度 %d/%d" % [
@@ -172,6 +175,9 @@ func show_options(options: Array, wave_num: int, reason_text: String, on_choice:
 				cost_label.visible = false
 			# 图标可能没有（某项还没配图）—— 那就隐藏图标框，布局自动收回
 			var tex := AssetDB.upgrade_icon(String(opt["id"]))
+			if tex == null and opt.has("weapon_id"):
+				# 副武器卡（2026-09-22）：没有专属升级图标，直接用武器本体贴图当卡面图
+				tex = AssetDB.extra_weapon_tex(String(opt["weapon_id"]))
 			_icons[i].texture = tex
 			_icons[i].visible = tex != null
 		else:

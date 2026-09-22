@@ -23,7 +23,7 @@ extends RefCounted
 const ROOT := "res://assets/"
 
 # ================================================================ 角色
-## 立绘 + 动画帧数。美术只有 4 个角色（基础嘉豪 / 学习豪 / 金融豪 / 忧郁豪）。
+## 立绘 + 动画帧数。美术只有 4 个角色（嘉豪 / 学习嘉豪 / 金融嘉豪 / 忧郁嘉豪）。
 ## ⚠️ GDD 里写的是「土豆 + 肥嘟嘟袋鼠怪 + 嘉豪×3」共 5 个可玩角色，
 ##    但美术资源里没有「土豆」立绘，且「肥嘟嘟袋鼠怪」只作为【敌人】出现。
 ##    这里是按美术资源实际情况登记的；GDD 与美术的角色表需要对齐（见交付说明）。
@@ -131,8 +131,12 @@ const WEAPON_BULLETS := {
 		"cell_px": 42.0,
 		"fallback": Color("#FFD700"),
 	},
+	# 2026-09-22 Bo 需求：忧郁嘉豪【未进化 ↔ 进化】形态的弹道贴图整体对调 ——
+	# 未进化（本键，暗影弹）改用原进化贴图 w_sad_siphon；进化 sad_evo 改用原未进化贴图 w_shadow_orb。
+	# 两张同为 560×128 / 4 帧 / 帧 128² / step 144 / 7fps，且都走帧格中心对齐（content 空）
+	# ⇒ 只换 tex 字符串即可，尺寸 / 锚点 / 渲染层级逐项保持原样（对调不动任何显示参数）。
 	"sad": {
-		"tex": "weapons/w_shadow_orb.png",
+		"tex": "weapons/w_sad_siphon.png",
 		"frames": 4, "fw": 128, "fh": 128, "step": 144, "fps": 7.0,
 		"content": Rect2(),
 		"cell_px": 52.0,
@@ -179,8 +183,10 @@ const WEAPON_BULLETS := {
 		"cell_px": 42.0,
 		"fallback": Color("#FFD700"),
 	},
+	# 2026-09-22 与未进化 sad 键成对调换：进化（暗影汲取）改用原未进化贴图 w_shadow_orb。
+	# 两键的 frames/fw/fh/step/fps/content/cell_px/fallback 全部一致 ⇒ 纯换图，显示参数不变。
 	"sad_evo": {
-		"tex": "weapons/w_sad_siphon.png",
+		"tex": "weapons/w_shadow_orb.png",
 		"frames": 4, "fw": 128, "fh": 128, "step": 144, "fps": 7.0,
 		"content": Rect2(),
 		"cell_px": 52.0,
@@ -290,6 +296,15 @@ const UPGRADE_ICONS := {
 	"lucky": "ui/upgrade_lucky.png",
 	"maxHpPct": "ui/upgrade_maxHpPct.png",
 	"cdr": "ui/upgrade_cdr.png",
+}
+
+## 副武器本体贴图（键 = 副武器 id，见 GameStats.EXTRA_WEAPON_DEFS）。
+## 2026-09-22 豆包出图，经 `docs/review/_stripbg_weapons.py` 抠白底 + 裁包围盒 +
+## 缩放入库（源图是 1024×1024 RGB 不透明白底 —— AI 图的老问题，必须过一遍抠图管线）。
+## 闪电链 / 冰霜新星 / 毒云按设计就是程序化的，永远不需要贴图。
+const EXTRA_WEAPON_TEX := {
+	"orbit": "weapons/w_orbit_blade.png",     # 256×71（橙红短刀，刀尖朝右）
+	"missile": "weapons/w_missile.png",       # 148×256（绿身红尾翼小火箭，头朝上）
 }
 
 const UI := {
@@ -507,6 +522,13 @@ static func upgrade_icon(upgrade_id: String) -> Texture2D:
 	if not UPGRADE_ICONS.has(upgrade_id):
 		return null
 	return tex(UPGRADE_ICONS[upgrade_id])
+
+
+## 副武器本体贴图。未登记 / 缺图 → null（调用方回落程序化画法，不影响玩法）。
+static func extra_weapon_tex(weapon_id: String) -> Texture2D:
+	if not EXTRA_WEAPON_TEX.has(weapon_id):
+		return null
+	return tex(EXTRA_WEAPON_TEX[weapon_id])
 
 
 ## UI 元件纹理（摇杆 / 卡框 / 金币条 / 按钮等）。未登记或缺图返回 null，调用方自行回落。

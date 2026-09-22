@@ -5,7 +5,7 @@ extends Node2D
 ## 生命周期：life <= 0 或飞出屏幕 → 由 Battle 回收。
 ## 穿透：每命中一个敌人 pierced += 1，pierced >= pierce_cap 即回收。
 ##   ⚠️ 判定用的是【逐弹道】`pierce_cap`（武器表 pierce），不是全局 PROJ_PIERCE ——
-##   忧郁豪的暗影弹 pierce=99 靠的就是这条，用全局常量会让它永远打穿 2 个就回收。
+##   忧郁嘉豪的暗影弹 pierce=99 靠的就是这条，用全局常量会让它永远打穿 2 个就回收。
 
 var velocity: Vector2 = Vector2.ZERO
 var radius: float = GameStats.PROJ_RADIUS
@@ -18,12 +18,12 @@ var pierced: int = 0
 var from_player: bool = true
 var body_color: Color = Color("#FFD700")
 # ---- 逐弹道武器参数（由 Battle/CombatResolver 按 WEAPON_DEFS 写入）----
-## 弹速乘区（乘以 PROJ_SPEED）。基础嘉豪 = 1.0。
+## 弹速乘区（乘以 PROJ_SPEED）。嘉豪 = 1.0。
 var speed_mul: float = 1.0
 ## 穿透上限（**逐弹道**，不是全局 PROJ_PIERCE）。pierced >= pierce_cap 即回收。
-## 忧郁豪用 99 实现「直线贯穿全屏」—— 所以判定必须读这里，不能读全局常量。
+## 忧郁嘉豪用 99 实现「直线贯穿全屏」—— 所以判定必须读这里，不能读全局常量。
 var pierce_cap: int = GameStats.PROJ_PIERCE
-## 命中时掉金币的概率（0 = 不掉）。金融豪金币镖 = 0.12。
+## 命中时掉金币的概率（0 = 不掉）。金融嘉豪金币镖 = 0.12。
 var gold_on_hit: float = 0.0
 ## 命中溅射半径（px，0 = 无溅射）。土豆第二形态「爆裂薯块」= 90。
 ## 溅射在 CombatResolver.process_projectiles 结算：圈内【其他】敌人受直接伤害 × aoe_pct。

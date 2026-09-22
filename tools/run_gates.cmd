@@ -133,6 +133,16 @@ rem 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会�
 "%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeDifficulty.gd > "%P%\_g29_last.txt" 2>&1
 if errorlevel 1 (echo   FAIL ^（详见 _g29_last.txt^） & set FAIL=1) else (echo   ok)
 
+echo [30/30] wave clear rhythm - 30s spawn window / no spawn after close / kill-ratio bar / no countdown text
+rem 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 findstr 误报（同 [27][28][29]）
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeWaveClear.gd > "%P%\_g30_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL ^（详见 _g30_last.txt^） & set FAIL=1) else (echo   ok)
+
+echo [31/31] elite affix system - table / spawn curve (wave^>=5, 1+wave/8) / swift-armored-enraged / exploder aoe + summoner / gold x3 + coupon / shop 0.8
+rem 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 findstr 误报（同 [27][28][29][30]）
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeEliteAffix.gd > "%P%\_g31_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL ^（详见 _g31_last.txt^） & set FAIL=1) else (echo   ok)
+
 echo.
 if %FAIL%==0 (echo ALL GATES PASS) else (echo SOME GATES FAILED)
 exit /b %FAIL%

@@ -109,6 +109,16 @@ echo "[29/29] difficulty system - table / normal bit-identical / hard multiplier
 "$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeDifficulty.gd > "$P/_g29_last.txt" 2>&1
 pass $?
 
+echo "[30/30] wave clear rhythm - 30s spawn window / no spawn after close / kill-ratio bar / no countdown text"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeWaveClear.gd > "$P/_g30_last.txt" 2>&1
+pass $?
+
+echo "[31/31] elite affix system - table / spawn curve (wave>=5, 1+wave/8) / swift-armored-enraged / exploder aoe + summoner / gold x3 + coupon / shop 0.8"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29][30]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeEliteAffix.gd > "$P/_g31_last.txt" 2>&1
+pass $?
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部门禁 PASS"; else echo "有门禁未通过"; fi
 exit "$FAIL"

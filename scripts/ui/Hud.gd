@@ -1,6 +1,6 @@
 class_name Hud
 extends CanvasLayer
-## 屏幕 HUD：血条 + 经验条 / 波次号 + 倒计时 / 等级 / 金币。全部用中文显示。
+## 屏幕 HUD：血条 + 经验条 / 波次号 + 清场进度条 / 等级 / 金币。全部用中文显示。
 
 var _root: Control
 var _hp_fill: ColorRect
@@ -8,6 +8,12 @@ var _hp_text: Label
 ## 经验条（2026-09-20 用户需求）：血条正下方的细条，展示当前经验/升级所需比例。
 var _xp_fill: ColorRect
 var _wave_label: Label
+## 清场进度条（2026-09-21 用户需求）：取代旧的 30 秒倒计时。位置 = 波次号正下方居中，
+## 样式 = 与血量/经验同为进度条，但用【黄色粗线条】。进度 = 已击杀 / (清场时场上 + 已击杀)。
+var _clear_bar_bg: ColorRect
+var _clear_fill: ColorRect
+## 进度条顶部亮金描边（纯装饰，让粗线条边界在浅色地面上也清晰）。
+var _clear_edge: ColorRect
 var _info_label: Label
 var _stats_label: Label
 ## 武器精通进度（2026-09-20 可达性升级）：进化前显示「武器精通 n/6」，
@@ -24,6 +30,17 @@ const BAR_Y := GameStats.VIEW_HEIGHT - 56.0
 ## 经验条几何：与血条同宽居中、贴在血条下方 4px，细条（辅助信息不抢血条的视觉权重）。
 const XP_BAR_H := 10.0
 const XP_BAR_Y := BAR_Y + BAR_H + 4.0
+## 清场进度条几何（2026-09-21 用户需求）：波次号正下方居中。
+## 「粗线条」⇒ 比经验条(10)厚；比血条(22)窄，视觉上是一条独立的信息条而非第二根血条。
+const CLEAR_BAR_W := 420.0
+const CLEAR_BAR_H := 16.0
+const CLEAR_BAR_X := (GameStats.VIEW_WIDTH - CLEAR_BAR_W) * 0.5
+## 波次号 Label 占 y=12..46 ⇒ 进度条贴在其下沿稍留 2px 呼吸。
+const CLEAR_BAR_Y := 48.0
+## 填充色 = 金黄色（与顶部波次号 #FFD700 同色系，语义关联："这条代表本波进度"），
+## 描边用更亮的金黄让粗线条的边界在浅色地面上也立得住。
+const CLEAR_FILL_COLOR := Color("#FFD24A")
+const CLEAR_EDGE_COLOR := Color("#FFF0A8")
 
 
 func _ready() -> void:
@@ -33,18 +50,45 @@ func _ready() -> void:
 	add_child(_root)
 	UiFont.install(_root, 20)
 
-	# 波次 + 倒计时（顶部居中）
+	# 波次号（顶部居中）。2026-09-21：倒计时已移除，此行只显示波次。
 	_wave_label = _make_label(0.0, 12.0, GameStats.VIEW_WIDTH, 34.0)
 	_wave_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_wave_label.add_theme_font_size_override("font_size", 24)
 	_wave_label.add_theme_color_override("font_color", Color("#FFD700"))
 
 	# 武器精通进度（顶部居中、波次行下方）：进化前显示 n/6，是通往第二形态的路标
-	_mastery_label = _make_label(0.0, 44.0, GameStats.VIEW_WIDTH, 22.0)
+	_mastery_label = _make_label(0.0, 88.0, GameStats.VIEW_WIDTH, 22.0)
 	_mastery_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_mastery_label.add_theme_font_size_override("font_size", 15)
 	_mastery_label.add_theme_color_override("font_color", Color(0.72, 0.88, 1.0))
 	_mastery_label.visible = false
+
+	# 波次清场进度条（2026-09-21 用户需求）：取代旧的 30 秒倒计时，位置 = 波次号正下方居中。
+	# 黑底 + 金黄填充，比经验条厚（「粗线条」）—— 玩家一眼看的是「还差多少清完」，
+	# 不再是「还剩多少秒」。
+	_clear_bar_bg = ColorRect.new()
+	_clear_bar_bg.color = Color(0, 0, 0, 0.62)
+	_clear_bar_bg.position = Vector2(CLEAR_BAR_X, CLEAR_BAR_Y)
+	_clear_bar_bg.size = Vector2(CLEAR_BAR_W, CLEAR_BAR_H)
+	_clear_bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(_clear_bar_bg)
+
+	_clear_fill = ColorRect.new()
+	_clear_fill.color = CLEAR_FILL_COLOR
+	_clear_fill.position = Vector2(CLEAR_BAR_X + 2.0, CLEAR_BAR_Y + 2.0)
+	# 开局进度 0：宽度为 0 的 ColorRect 不画任何像素，正是「一个都没杀 = 0%」
+	_clear_fill.size = Vector2(0.0, CLEAR_BAR_H - 4.0)
+	_clear_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(_clear_fill)
+
+	# 亮金描边：让整条进度条在任何地面主题上都「立得住」（粗线条的边界感）
+	var clear_edge := ColorRect.new()
+	clear_edge.color = CLEAR_EDGE_COLOR
+	clear_edge.position = Vector2(CLEAR_BAR_X + 2.0, CLEAR_BAR_Y + 2.0)
+	clear_edge.size = Vector2(0.0, 2.0)
+	clear_edge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_clear_fill.add_child(clear_edge)
+	_clear_edge = clear_edge
 
 	# 屏幕中央大字（Boss 狂暴等突发事件）：默认隐藏，show_center_notice 点亮
 	_notice_label = _make_label(0.0, GameStats.VIEW_HEIGHT * 0.30, GameStats.VIEW_WIDTH, 56.0)
@@ -123,17 +167,18 @@ func _make_label(x: float, y: float, w: float, h: float) -> Label:
 
 ## 每帧刷新。max_wave 用于显示「当前/总数」（无尽模式忽略它）。签名保持不变。
 func set_data(p: Player, wave_num: int, wave_timer: float, max_wave: int) -> void:
-	# Boss 波不显示剩余秒数（2026-09-20 需求 §2.1）：波次靠击杀 Boss 推进，
-	# 倒计时到 0 也不会结算，剩余秒数是误导 —— 显示 BOSS 字样代替。
+	# 2026-09-21 用户需求：不再显示 30 秒倒计时（「剩余 N 秒」整段移除）——
+	# 每波 30 秒是【生成敌人的时间】，通关条件是清场而不是熬时间，秒数对玩家没有决策价值。
+	# 秒数仍在 wave_timer 里驱动投放窗口，只是不上屏。波次号独占一行、居中。
 	if GameStats.is_boss_wave(wave_num):
 		if GameSession.endless:
 			_wave_label.text = "第 %d 波（无尽）      BOSS" % wave_num
 		else:
 			_wave_label.text = "第 %d / %d 波      BOSS" % [wave_num, max_wave]
 	elif GameSession.endless:
-		_wave_label.text = "第 %d 波（无尽）      剩余 %d 秒" % [wave_num, maxi(0, ceili(wave_timer))]
+		_wave_label.text = "第 %d 波（无尽）" % wave_num
 	else:
-		_wave_label.text = "第 %d / %d 波     剩余 %d 秒" % [wave_num, max_wave, maxi(0, ceili(wave_timer))]
+		_wave_label.text = "第 %d / %d 波" % [wave_num, max_wave]
 	_info_label.text = "难度 %s · 等级 %d · 金币 %d" % [
 		GameStats.difficulty_name(), p.level, p.gold]
 	# 武器精通进度：进化前常显（0/6 也显示，做路标）；满 6 层进化后隐藏（另有全屏播报）
@@ -154,6 +199,8 @@ func set_data(p: Player, wave_num: int, wave_timer: float, max_wave: int) -> voi
 	if _xp_fill != null and p.xp_to_next > 0:
 		var xp_ratio := clampf(float(p.xp) / float(p.xp_to_next), 0.0, 1.0)
 		_xp_fill.size = Vector2((BAR_W - 4.0) * xp_ratio, XP_BAR_H - 4.0)
+	# 清场进度条：由调用方（Battle）经 set_clear_ratio 在【每帧】刷新 —— 它是唯一需要
+	# 帧级实时的 HUD 元素（清掉一只怪要立刻看到条涨），而本函数只在 HUD_INTERVAL 节拍上跑。
 	# 常驻属性面板：四行核心战斗属性（与升级/商店直接对应的项全部展示）
 	_stats_label.text = ("攻击 %d    护甲 %d    移速 %d\n"
 		+ "攻速 %.2f/s   弹道 %d   射程 %d\n"
@@ -164,6 +211,17 @@ func set_data(p: Player, wave_num: int, wave_timer: float, max_wave: int) -> voi
 		roundi(p.crit * 100.0), roundi(p.critd * 100.0), roundi(p.dodge * 100.0),
 		roundi(p.lifesteal * 100.0), p.hp_regen, roundi(p.pickup_range),
 	]
+
+
+## 本波清场进度 0..1 → 黄条宽度。每帧由 Battle 调用（见 _tick_fighting）。
+## 0 时宽度为 0：一个敌人都没杀就是空的，这正是用户要的语义。
+func set_clear_ratio(r: float) -> void:
+	if _clear_fill == null:
+		return
+	var w := (CLEAR_BAR_W - 4.0) * clampf(r, 0.0, 1.0)
+	_clear_fill.size = Vector2(w, CLEAR_BAR_H - 4.0)
+	if _clear_edge != null:
+		_clear_edge.size = Vector2(w, 2.0)
 
 
 func set_visible_hud(v: bool) -> void:
