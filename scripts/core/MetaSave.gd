@@ -4,8 +4,9 @@ extends RefCounted
 ##
 ## 设计（记录决策）：
 ##   · 账本：最佳波次/累计击杀/累计金币/局数/胜场，结算时自动入账。
-##   · 消费端（本片）：局内表现折算 meta_xp，在标题画面购买 3 条永久强化
-##     （META_UPGRADES）。折算公式与价格全部 [PLACEHOLDER]，playtest 后调。
+##   · 消费端（本片）：局内表现折算 meta_xp，在标题画面购买永久强化
+##     （META_UPGRADES，2026-09-22 由 3 条扩到 9 条）。折算公式与价格全部 [PLACEHOLDER]，
+##     playtest 后调。
 ##   · 静态类而非 autoload：探针可显式控制读写路径（save_path 可重定向），工程树零接线。
 ##   · JSON 存储（user:// 下），损坏/缺失一律安全回落干净账本（never crash）。
 ##   · schema_version=2：v1 存档（无 meta 键）读取时自动补 0，不弹版本错误。
@@ -21,22 +22,65 @@ const SCHEMA_VERSION := 2
 const KEYS := ["best_wave", "best_endless_wave", "total_kills", "total_gold", "runs", "wins", "meta_xp"]
 ## 已解锁角色的持久化键（不属于结算 int 键，单独读写）
 const UNLOCKED_KEY := "unlocked_chars"
-## 默认解锁：只有基础嘉豪。其余角色走选角界面的「模拟充值」解锁（2026-09-20 用户需求）。
+## 默认解锁：只有嘉豪。其余角色走选角界面的「模拟充值」解锁（2026-09-20 用户需求）。
 const DEFAULT_UNLOCKED := ["basic"]
+## 设置项持久化键（2026-09-22 设置菜单）：与结算 int 键/角色解锁分离，单独一个子字典存。
+const SETTINGS_KEY := "settings"
+## 设置项默认值 —— 【唯一的默认源】：读写类型护栏的回落值、UI 初值全部从这里取，
+## 改这一处即全局生效（music_vol/sfx_vol 是 0~1 线性音量，两个开关是显示类）。
+const DEFAULT_SETTINGS := {
+	"music_vol": 1.0,
+	"sfx_vol": 1.0,
+	"show_floats": true,
+	"screen_shake": true,
+}
 
 ## 永久强化表（[PLACEHOLDER] 全部数值待 playtest）。
 ## cost(n) = 买第 n 级（从 0 计）的花费 = base_cost × cost_growth^level。
-## 效果折算见 meta_bonus()：atk/pickup 是乘区，hp 是整数平加。
+## 效果折算见 meta_bonus()：atk/pickup/gold/xp 是乘区，hp/start_gold 是整数平加，
+## crit 加法、aspd 是乘区，revive 是「存在即 1」的一次性解锁。
+##
+## 【2026-09-22 扩充：3 → 9 条】原表只有火力/生命/拾取，很快买满、通关后没追求。
+## 追加 6 条覆盖经济（财富/启动资金）/经验（智慧）/生存（复活契约）/输出（致命/急速），
+## 给几十局的长线目标。UI 侧自动遍历本表渲染 ⇒ **加条目不用动 UI 代码**。
+## 排序 = 商店显示顺序：先输出/生存（前三），再经济/经验，最后一次性大件。
+##
+## ⚠️ 命名易混：**强化的 id `meta_xp` 与账本的货币键 `meta_xp` 同名但不同层** ——
+## 货币在 `ledger()["meta_xp"]`（顶层，买强化花的点数），
+## 强化等级在 `ledger()["meta_levels"]["meta_xp"]`（玩家花的货币去买的东西）。
+## 两者永不相遇（ledger() 只把「表里登记过的 id」收进 meta_levels）。改代码时别读错层。
 const META_UPGRADES := [
-	{"id": "meta_atk", "name": "火力强化", "desc": "攻击力 +3%", "max_level": 5,
+	{"id": "meta_atk", "name": "火力强化", "desc": "攻击力 +3%/级", "max_level": 5,
 		"base_cost": 120, "cost_growth": 2.0},
-	{"id": "meta_hp", "name": "生命强化", "desc": "生命上限 +20", "max_level": 5,
+	{"id": "meta_hp", "name": "生命强化", "desc": "生命上限 +20/级", "max_level": 5,
 		"base_cost": 100, "cost_growth": 2.0},
-	{"id": "meta_pickup", "name": "磁力强化", "desc": "拾取范围 +15%", "max_level": 3,
+	{"id": "meta_crit", "name": "致命强化", "desc": "暴击率 +2%/级", "max_level": 5,
+		"base_cost": 130, "cost_growth": 2.0},
+	{"id": "meta_aspd", "name": "急速强化", "desc": "攻速 +3%/级", "max_level": 5,
+		"base_cost": 120, "cost_growth": 2.0},
+	{"id": "meta_pickup", "name": "磁力强化", "desc": "拾取范围 +15%/级", "max_level": 3,
 		"base_cost": 80, "cost_growth": 2.0},
+	{"id": "meta_gold", "name": "财富强化", "desc": "局内金币获取 +10%/级", "max_level": 5,
+		"base_cost": 100, "cost_growth": 2.0},
+	{"id": "meta_xp", "name": "智慧强化", "desc": "局内经验获取 +8%/级", "max_level": 5,
+		"base_cost": 110, "cost_growth": 2.0},
+	{"id": "meta_start_gold", "name": "启动资金", "desc": "开局金币 +50/级", "max_level": 3,
+		"base_cost": 90, "cost_growth": 1.8},
+	# 一次性大件：max_level=1 ⇒ 首级价 500 即唯一价（cost_growth=1.0 不参与曲线）。
+	# 500 xp ≈ 打 5~8 局，是全局最贵的一项 —— 强力项刻意不设叠层。
+	{"id": "meta_revive", "name": "复活契约", "desc": "每局开局自带 1 次复活（回 50% 血）",
+		"max_level": 1, "base_cost": 500, "cost_growth": 1.0},
 ]
 
 static var save_path := "user://meta_save.json"
+
+## 设置缓存（2026-09-22 设置菜单）：飘字/震屏开关在【战斗热路径】被高频读取
+## （每次命中/受击都读一次），若每次都走 ledger() 的「开文件 + JSON.parse」会拖垮帧率。
+## 这里缓存解析好的设置，热路径只做一次字典查表；仅在 save_path 变化（探针重定向）
+## 或 set_setting 写档时刷新。
+static var _settings_cache: Dictionary = {}
+## 缓存对应的 save_path —— 探针会重定向 save_path，路径一变缓存即失效重载。
+static var _settings_path := ""
 
 
 ## JSON 脏数据护栏（审查 P2）：ledger 直接把存档值喂给 int() —— int(Array/Dictionary)
@@ -77,6 +121,11 @@ static func ledger() -> Dictionary:
 			var cid := String(id)
 			if GameStats.CHARACTERS.has(cid) and not (d[UNLOCKED_KEY] as Array).has(cid):
 				(d[UNLOCKED_KEY] as Array).append(cid)   # 只收合法角色 id，防脏数据
+	# 设置项（2026-09-22）：非字典（字符串/数组/null）= 坏档 → 保留 _defaults 里的默认值；
+	# 是字典则逐键过类型护栏（详见 _safe_settings）。
+	var st = parsed.get(SETTINGS_KEY, null)
+	if typeof(st) == TYPE_DICTIONARY:
+		d[SETTINGS_KEY] = _safe_settings(st)
 	return d
 
 
@@ -145,14 +194,31 @@ static func purchase(id: String) -> bool:
 	return true
 
 
-## 汇总当前等级的玩家加成（Player.recalc_stats 叠加用；0 级时全 0 = 零行为变化）。
-## 键：atk_mul（攻击乘区）/ hp_flat（生命平加）/ pickup_mul（拾取乘区）。
+## 汇总当前等级的玩家加成（Player / Battle 消费；0 级时全 0 = 零行为变化）。
+## 返回键（9 个，与 META_UPGRADES 一一对应）：
+##   atk_mul      攻击乘区（乘）           hp_flat      生命上限平加
+##   pickup_mul   拾取范围乘区（乘）        gold_mul     局内金币获取乘区（乘）
+##   xp_mul       局内经验获取乘区（乘）    crit         暴击率（加法）
+##   aspd_mul     攻速乘区（乘）           start_gold   开局金币（整数平加）
+##   revive       复活契约层数（>0 即每局自带 1 次复活，**不叠**）
+##
+## ⚠️ 数值是【唯一真源】：UI 的 desc 文案若与之不符，以本函数为准（探针断言的也是这里）。
+## get 全带默认值 ⇒ 字段缺失/空字典/旧档都安全（never crash）。
 static func meta_bonus() -> Dictionary:
 	var lv: Dictionary = ledger()["meta_levels"]
+	var n_gold := maxi(0, int(lv.get("meta_gold", 0)))
+	var n_xp := maxi(0, int(lv.get("meta_xp", 0)))
 	return {
 		"atk_mul": 0.03 * float(maxi(0, int(lv.get("meta_atk", 0)))),
 		"hp_flat": 20.0 * float(maxi(0, int(lv.get("meta_hp", 0)))),
 		"pickup_mul": 0.15 * float(maxi(0, int(lv.get("meta_pickup", 0)))),
+		"gold_mul": 0.10 * float(n_gold),
+		"xp_mul": 0.08 * float(n_xp),
+		"crit": 0.02 * float(maxi(0, int(lv.get("meta_crit", 0)))),
+		"aspd_mul": 0.03 * float(maxi(0, int(lv.get("meta_aspd", 0)))),
+		"start_gold": 50.0 * float(maxi(0, int(lv.get("meta_start_gold", 0)))),
+		# 复活契约：max_level=1 ⇒ 用 [0/1] 而不是层数 —— 消费端只判 > 0，不做乘算。
+		"revive": 1 if maxi(0, int(lv.get("meta_revive", 0))) > 0 else 0,
 	}
 
 
@@ -175,12 +241,81 @@ static func unlock_char(id: String) -> bool:
 	return true
 
 
+# ---------------------------------------------------------------- 设置项（2026-09-22 设置菜单）
+## 读单项设置。未知键返回 null；已知键缺失/坏档时回落到 DEFAULT_SETTINGS 的对应值。
+## 【热路径（每次命中/受击）会调它】—— 走 _settings_cache 字典查表，不做文件 IO。
+static func get_setting(key: String) -> Variant:
+	_ensure_settings()
+	if _settings_cache.has(key):
+		return _settings_cache[key]
+	return DEFAULT_SETTINGS.get(key)
+
+
+## 写单项设置：过类型护栏（音量钳 0~1、开关转 bool）→ 更新缓存 → 落盘。
+## 未知键直接丢弃（防脏键写档）。value 非法时回落到该键默认值，绝不写入坏类型。
+## flush=false（质检 P2-4，2026-09-22）：只更新缓存不落盘 —— 给音量滑块的
+## value_changed 用（拖动时每秒触发几十次，旧版每次都是「读档+写档」双 IO）；
+## 调用方在 drag_ended 时再以默认 flush=true 落一次盘。开关类低频调用不受影响。
+static func set_setting(key: String, value: Variant, flush: bool = true) -> void:
+	if not DEFAULT_SETTINGS.has(key):
+		return
+	_ensure_settings()
+	_settings_cache[key] = _guard_value(key, value)
+	if not flush:
+		return
+	var d := ledger()
+	d[SETTINGS_KEY] = _settings_cache.duplicate(true)
+	_save(d)
+
+
+## 保证设置缓存已从当前 save_path 载入。save_path 变（探针重定向）即重新载入。
+static func _ensure_settings() -> void:
+	if _settings_path == save_path and not _settings_cache.is_empty():
+		return
+	var d := ledger()
+	_settings_cache = (d[SETTINGS_KEY] as Dictionary).duplicate(true)
+	_settings_path = save_path
+
+
+## 单项类型的护栏分派（唯一入口：ledger 读 / _save 写 / set_setting 都走它）。
+static func _guard_value(key: String, value: Variant) -> Variant:
+	match key:
+		"music_vol", "sfx_vol":
+			return _guard_vol(value, float(DEFAULT_SETTINGS[key]))
+		"show_floats", "screen_shake":
+			return _guard_bool(value, bool(DEFAULT_SETTINGS[key]))
+	return value
+
+
+## 音量护栏：数字 → 钳到 [0,1]；非数字（字符串/数组/字典/null/bool）→ 回落默认。
+static func _guard_vol(v: Variant, fallback: float) -> float:
+	if v is float or v is int:
+		return clampf(float(v), 0.0, 1.0)
+	return fallback
+
+
+## 开关护栏：bool → 原值；其余类型 → 回落默认。
+static func _guard_bool(v: Variant, fallback: bool) -> bool:
+	if v is bool:
+		return v
+	return fallback
+
+
+## 整个设置字典的护栏：逐键走 _guard_value（键缺失也补默认），保证返回结构恒定 4 键。
+static func _safe_settings(raw: Dictionary) -> Dictionary:
+	var out := {}
+	for k in DEFAULT_SETTINGS.keys():
+		out[k] = _guard_value(String(k), raw.get(k, null))
+	return out
+
+
 static func _defaults() -> Dictionary:
 	var d := {}
 	for k in KEYS:
 		d[k] = 0
 	d["meta_levels"] = {}
 	d[UNLOCKED_KEY] = DEFAULT_UNLOCKED.duplicate()
+	d[SETTINGS_KEY] = DEFAULT_SETTINGS.duplicate(true)
 	return d
 
 
@@ -194,5 +329,7 @@ static func _save(d: Dictionary) -> bool:
 		out[k] = int(d.get(k, 0))
 	out["meta_levels"] = d.get("meta_levels", {})
 	out[UNLOCKED_KEY] = d.get(UNLOCKED_KEY, DEFAULT_UNLOCKED)
+	# 设置项：写前再过一遍护栏，保证落盘的永远是合法类型/范围（防脏数据回写）。
+	out[SETTINGS_KEY] = _safe_settings(d.get(SETTINGS_KEY, DEFAULT_SETTINGS))
 	f.store_string(JSON.stringify(out, "  "))
 	return true

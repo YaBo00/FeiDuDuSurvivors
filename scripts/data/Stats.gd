@@ -462,24 +462,24 @@ static func difficulty_def() -> Dictionary:
 static func difficulty_name() -> String:
 	return String(difficulty_def()["name"])
 
-## 波末升级三选一的选项数（基础值；学习豪的天赋会 +1）。
+## 波末升级三选一的选项数（基础值；学习嘉豪的天赋会 +1）。
 const UPGRADE_OPTIONS := 3
 
 # ============================================================ 角色
 
 ## 角色表。4 个嘉豪。差异按 H5 CHARACTERS 的 baseStats 原样照抄 ——
-## H5 是把天赋效果【直接烘进 baseStats】的（例如忧郁豪的 maxHp 65 / atk 14 / spd 172
+## H5 是把天赋效果【直接烘进 baseStats】的（例如忧郁嘉豪的 maxHp 65 / atk 14 / spd 172
 ## 本身就是「HP-30%、伤害+40%、移速+15%」的结果），这里保持一致，不另写一套天赋系统。
 ##
 ## 属性表达不了的天赋用额外字段：
-##   start_gold         初始金币（H5 金融豪 = 80）
-##   xp_mul             升级所需经验的倍率（学习豪 0.77 = 更快升级）
-##   upgrade_opt_bonus  升级选项数量加成（学习豪 +1）
+##   start_gold         初始金币（H5 金融嘉豪 = 80）
+##   xp_mul             升级所需经验的倍率（学习嘉豪 0.77 = 更快升级）
+##   upgrade_opt_bonus  升级选项数量加成（学习嘉豪 +1）
 ##
 ## `base` 里的 pickupRange 是新增的（H5 没有），见「掉落 / 拾取」一节。
 const CHARACTERS := {
 	"basic": {
-		"name": "基础嘉豪", "portrait": "chars/basic.png",
+		"name": "嘉豪", "portrait": "chars/basic.png",
 		"talent": "新手保护·初心",
 		"desc": "每局第一次致死免死：回 1 血并获得 1 秒无敌。其余成长全为标准值。",
 		"trait_id": "beginner_save",
@@ -491,7 +491,7 @@ const CHARACTERS := {
 		},
 	},
 	"study": {
-		"name": "学习豪", "portrait": "chars/study.png",
+		"name": "学习嘉豪", "portrait": "chars/study.png",
 		"talent": "题海精进",
 		"desc": "经验 +30%，升级选项 +1；每升一级永久 +3% 攻速。",
 		"trait_id": "levelup_aspd",
@@ -503,7 +503,7 @@ const CHARACTERS := {
 		},
 	},
 	"finance": {
-		"name": "金融豪", "portrait": "chars/finance.png",
+		"name": "金融嘉豪", "portrait": "chars/finance.png",
 		"talent": "见钱眼开",
 		"desc": "金币 +50%，初始 $80；捡金币移速短暂 +5%（最多 3 层），商店永久 9 折。",
 		"trait_id": "money_rush",
@@ -515,7 +515,7 @@ const CHARACTERS := {
 		},
 	},
 	"sad": {
-		"name": "忧郁豪", "portrait": "chars/sad.png",
+		"name": "忧郁嘉豪", "portrait": "chars/sad.png",
 		"talent": "背水一战",
 		"desc": "伤害 +40%，HP −30%，移速 +15%；血量低于 50% 伤害再 +25%、低于 25% 共 +40%。",
 		"trait_id": "low_hp_fury",
@@ -558,7 +558,7 @@ const CHARACTERS := {
 		"trait_id": "move_stacks",
 		"start_gold": 20, "xp_mul": 1.0, "upgrade_opt_bonus": 0,
 		"base": {
-			"maxHp": 80,       # [PLACEHOLDER] 全队第二脆（仅高于忧郁豪 65），敢站桩就死
+			"maxHp": 80,       # [PLACEHOLDER] 全队第二脆（仅高于忧郁嘉豪 65），敢站桩就死
 			"atk": 9,          # [PLACEHOLDER] 低于基准 10，DPS 由武器与天赋层数补
 			"def": 0,          # [PLACEHOLDER] 脆皮不设甲
 			"spd": 188,        # [PLACEHOLDER] 全队最高（basic 150 的 1.25 倍），游击立身之本
@@ -704,13 +704,19 @@ const MAX_ASPD := 10.0   # [PLACEHOLDER] 攻速倍率硬上限，防止极端叠
 
 # ============================================================ 弹道
 
+## 弹速整体缩放（2026-09-22 需求：主武器子弹初速过快 → 先 ×0.75，仍嫌快再降到 ×0.5）。
+## 单一真源：PROJ_SPEED 与 PROJ_LIFE 都由它派生，改这一个数即整体「等比降速 + 补寿命」。
+const PROJ_SPEED_MUL := 0.5
 ## [PLACEHOLDER] 弹道速度。H5 PROJ_SPEED=300 → ×SPATIAL_SCALE。
-const PROJ_SPEED := 300.0 * SPATIAL_SCALE
+const PROJ_SPEED := 300.0 * PROJ_SPEED_MUL * SPATIAL_SCALE
 const PROJ_RADIUS := 5.0
 ## 弹道寿命（秒）。旧值 2.0 → 最远飞 900px（跨半张地图），射程改近后
-## 落空的弹会飞进视野深处才消失、甚至在远处打死怪。0.8 x 450px/s = 360px，
-## 恰好飞出射程圈一小段（留穿透余量）。
-const PROJ_LIFE := 0.8
+## 落空的弹会飞进视野深处才消失、甚至在远处打死怪。
+## 2026-09-22：寿命 ×(1/PROJ_SPEED_MUL) —— 单弹最大飞行距离恒为 360px，即
+## 【只放慢弹速、射程与穿透余量一律不变】（300×0.5×1.5 px/s × 1.6s = 360px）。
+## ⚠️ 这两个常量必须成对改（都走 PROJ_SPEED_MUL）：只降弹速而不补寿命，落空弹
+## 最远只飞 180px，既缩短有效射程，也会让 _ProbePierce 的「5 连排穿透」用例失守。
+const PROJ_LIFE := 0.8 / PROJ_SPEED_MUL
 ## 最多命中数（穿透）：命中计数 >= 2 即移除。
 const PROJ_PIERCE := 2
 ## 多弹道扇形的每发偏角（弧度）。
@@ -847,10 +853,220 @@ static func weapon_color(id: String) -> Color:
 	return WEAPON_COLORS["basic"]
 
 
+# ============================================================ 局内副武器（2026-09-22）
+#
+# 需求文档：局内新武器设计_给代码AI_2026-09-22.md §1 / §2。
+# 目标：解决「每个角色从头到尾只有一把武器」—— 升级三选一里加入局内可获得/可升级的副武器，
+# 最多同时持有 MAX_EXTRA_WEAPONS 把，与主角武器【独立冷却、独立开火】。
+#
+# ⚠️ 与文档的两处实现取舍（按本工程既有架构落地，玩法语义不变）：
+#   ① 副武器状态（持有表 / 冷却 / 实体）放在 Battle 侧模块 ExtraWeaponSystem，
+#      Player 不新增字段 —— 单一数据源，避免「Player 与模块各存一份持有表」打架。
+#      每局清空由 Battle.start_run() → extra.reset() 保证（= 文档「死了重开清空」）。
+#   ② 升级卡【动态生成】而不是写死进 UPGRADE_POOL：获得/升级卡取决于运行时
+#      「已持有哪几把、各几级」，静态 const 表表达不了这个条件。
+#      生成 + 过滤规则见 Battle._generate_options / GameStats.extra_weapon_cards。
+#
+# 每把副武器的字段：
+#   name / desc     卡面文案
+#   color           特效兜底色（贴图缺失时的图元画法也用它）
+#   behavior        运行时分支键：orbit / lightning / ice_nova / acid
+#   max_level       最高等级（满级后升级卡消失）
+#   tiers           逐级参数表，长度 == max_level
+#   icon            升级卡图标相对路径（可选；缺失 = 不画图，其余照常）
+#
+# ⚠️ 数值全部 [PLACEHOLDER]，playtest 后只改本表（与 WEAPON_DEFS 同一纪律）。
+const EXTRA_WEAPON_DEFS := {
+	# ---- 环绕飞刃（近战 AOE，纯持续型：没有冷却，靠转速与刀数吃成长）----
+	# ★ 贴图需求：一张刀（64×64 透明底，刀身朝右）。缺失时回落到程序化画法。
+	"orbit": {
+		"name": "环绕飞刃", "desc": "飞刃绕你旋转，碰到敌人就造成伤害",
+		"color": Color(1.0, 0.62, 0.22), "behavior": "orbit", "max_level": 5,
+		"icon": "weapons/orbit.png",
+		"tiers": [
+			{"count": 2, "dmg_mul": 0.6, "radius": 80.0, "rot": 2.0, "slow": 0.0},
+			{"count": 2, "dmg_mul": 0.8, "radius": 95.0, "rot": 2.0, "slow": 0.0},
+			{"count": 3, "dmg_mul": 0.8, "radius": 95.0, "rot": 2.0, "slow": 0.0},
+			{"count": 3, "dmg_mul": 1.0, "radius": 95.0, "rot": 3.0, "slow": 0.0},
+			{"count": 4, "dmg_mul": 1.2, "radius": 110.0, "rot": 3.0, "slow": 0.2},
+		],
+	},
+	# ---- 闪电链（周期劈击，程序化折线，无需贴图）----
+	"lightning": {
+		"name": "闪电链", "desc": "每隔一段时间劈下一道闪电，并链到附近的敌人",
+		"color": Color(0.75, 0.9, 1.0), "behavior": "lightning", "max_level": 5,
+		"icon": "",
+		"tiers": [
+			{"interval": 2.0, "dmg_mul": 1.2, "chains": 2, "targets": 1},
+			{"interval": 1.8, "dmg_mul": 1.4, "chains": 2, "targets": 1},
+			{"interval": 1.6, "dmg_mul": 1.6, "chains": 3, "targets": 1},
+			{"interval": 1.4, "dmg_mul": 1.8, "chains": 3, "targets": 1},
+			{"interval": 1.2, "dmg_mul": 2.0, "chains": 3, "targets": 2},
+		],
+	},
+	# ---- 冰霜新星（控制向：周期冻结身边敌人，程序化圆圈，无需贴图）----
+	"ice_nova": {
+		"name": "冰霜新星", "desc": "周期性冻结身边的敌人，等级越高范围越大",
+		"color": Color(0.55, 0.85, 1.0), "behavior": "ice_nova", "max_level": 5,
+		"icon": "",
+		"tiers": [
+			{"interval": 3.0, "radius": 90.0, "freeze": 0.5, "dmg_mul": 0.0},
+			{"interval": 3.0, "radius": 100.0, "freeze": 0.6, "dmg_mul": 0.2},
+			{"interval": 2.5, "radius": 110.0, "freeze": 0.8, "dmg_mul": 0.3},
+			{"interval": 2.5, "radius": 120.0, "freeze": 0.8, "dmg_mul": 0.5},
+			{"interval": 2.0, "radius": 140.0, "freeze": 1.0, "dmg_mul": 0.8},
+		],
+	},
+	# ---- 毒云（地形控制：在脚下留毒，站上去持续掉血，程序化绿圈，无需贴图）----
+	"acid": {
+		"name": "毒云", "desc": "周期性在脚下留一滩毒，站上去持续掉血",
+		"color": Color(0.45, 0.85, 0.35), "behavior": "acid", "max_level": 5,
+		"icon": "",
+		"tiers": [
+			{"interval": 2.5, "life": 2.0, "radius": 60.0, "dps_mul": 0.3, "vuln": 1.0},
+			{"interval": 2.5, "life": 2.5, "radius": 70.0, "dps_mul": 0.5, "vuln": 1.0},
+			{"interval": 2.0, "life": 2.5, "radius": 80.0, "dps_mul": 0.6, "vuln": 1.0},
+			{"interval": 2.0, "life": 3.0, "radius": 90.0, "dps_mul": 0.8, "vuln": 1.0},
+			{"interval": 2.0, "life": 3.0, "radius": 100.0, "dps_mul": 1.0, "vuln": 1.2},
+		],
+	},
+	# ---- 追踪导弹（第 5 把，2026-09-22 补做：豆包已出图 w_missile.png）----
+	# 文档 §2.5 原标 TBD「除非用户后续要」—— 贴图产出即视为要，按表实现。
+	# 与前三把的区别：它是【飞行实体】（会拐弯追人），不是即时特效，所以走
+	# _missiles 状态表（与 _pools 同构），并在命中点做全额爆炸伤害。
+	"missile": {
+		"name": "追踪导弹", "desc": "自动追踪最近的敌人，命中后爆炸",
+		"color": Color(0.86, 0.95, 0.78), "behavior": "missile", "max_level": 5,
+		"icon": "weapons/w_missile.png",
+		"tiers": [
+			{"interval": 2.0, "count": 1, "dmg_mul": 1.5, "blast": 40.0},
+			{"interval": 2.0, "count": 1, "dmg_mul": 2.0, "blast": 50.0},
+			{"interval": 2.0, "count": 2, "dmg_mul": 2.0, "blast": 50.0},
+			{"interval": 2.0, "count": 2, "dmg_mul": 2.5, "blast": 60.0},
+			{"interval": 2.0, "count": 3, "dmg_mul": 3.0, "blast": 70.0},
+		],
+	},
+}
+
+## 副武器固定顺序（抽卡遍历用；改这里即可调「先出哪把」的倾向）。
+const EXTRA_WEAPON_IDS: Array[String] = ["orbit", "lightning", "ice_nova", "acid", "missile"]
+
+## 副武器同时持有上限（主角武器不计入）。
+const MAX_EXTRA_WEAPONS := 2
+
+## 抽卡出现率：每次升级/波末三选一，按此概率把一张副武器卡【替换】进选项里。
+## 文档 §3 要求「约普通升级卡权重的 1/3」—— 用替换而不是追加：
+## 追加进 avail 后要按 count/池子大小折算（≈23%），替换才是稳定的 1/3。
+const EXTRA_WEAPON_CARD_RATE := 0.34
+
+## 环绕飞刃：同一把刀对【同一敌人】的再命中冷却（秒）。
+## 刀的碰撞半径约 16px，而怪在重叠区会停留多帧 —— 不去重就会在同一只怪身上
+## 每帧扣血（比文档的「穿透 1」强太多）。用冷却表实现，等效于「碰到就伤、但不连击」。
+const ORBIT_HIT_CD := 0.5
+## 环绕飞刃：刀的碰撞半径（px，判定用）。视觉刀长另算（见 ExtraWeaponSystem）。
+const ORBIT_BLADE_RADIUS := 16.0
+## 环绕飞刃 Lv5 的减速：移速乘区与持续时间（秒，取 tier 的 slow 字段作时长）。
+const ORBIT_SLOW_MUL := 0.5
+
+## 闪电链：链跳到下一个目标的最大距离（px）。
+const LIGHTNING_CHAIN_RANGE := 200.0
+## 闪电链视觉：折线持续时间（秒）与锯齿振幅（px）、分段数。
+const LIGHTNING_FX_TIME := 0.15
+const LIGHTNING_FX_JAG := 9.0
+const LIGHTNING_FX_SEGS := 6
+## 闪电从目标上方多高处劈下（px，纯视觉）。
+const LIGHTNING_FX_HEIGHT := 320.0
+
+## 冰霜新星视觉：蓝圈从玩家位置扩散到目标半径的时长（秒）。
+const ICE_FX_TIME := 0.3
+
+## 毒云：每 tick 间隔（秒）与场上同时存在的池子上限（性能护栏）。
+const EXTRA_ACID_TICK := 0.5
+const MAX_ACID_POOLS := 8
+## 毒 buff（Lv5）：受击伤害乘区与持续时长（秒）。
+const ACID_VULN_DURATION := 3.0
+
+## 追踪导弹（第 5 把）：飞行速度（px/s）、转向速率（rad/s）、最长寿命（秒）、
+## 命中判定半径（px）、爆炸视觉时长（秒）、场上同时存在的枚数上限（性能护栏）。
+## 转向限速是「拐弯追」的观感来源 —— 无限制的话导弹会瞬间掉头，像贴图在瞬移。
+const MISSILE_SPEED := 420.0
+const MISSILE_TURN := 7.0
+const MISSILE_LIFE := 3.0
+const MISSILE_RADIUS := 14.0
+const MISSILE_BLAST_FX := 0.28
+const MAX_MISSILES := 12
+## 多枚齐射时的扇形张角（度）—— 不加张角的话几枚会叠在一起追同一个目标，
+## 视觉上像 1 枚、实际也只有 1 枚的伤害生效（其余撞同一个敌人被同一帧吃掉）。
+const MISSILE_SPREAD_DEG := 22.0
+
+## 冻结 / 减速对 Boss 的折扣（公平性护栏）：Boss 三招前摇是设计底线，不能被无限冻住。
+## 打折而不是免疫 —— 冻结仍然有效，只是控不住 Boss 太久。
+const EXTRA_FREEZE_BOSS_MUL := 0.5
+const EXTRA_SLOW_BOSS_MUL := 0.5
+
+
+## 取副武器定义（副本，调用方可安全读改）。未知 id 返回空字典。
+static func extra_weapon_def(id: String) -> Dictionary:
+	if not EXTRA_WEAPON_DEFS.has(id):
+		return {}
+	return (EXTRA_WEAPON_DEFS[id] as Dictionary).duplicate()
+
+
+## 取某等级的参数行（1 基）。越界钳到最近一级；未知 id / 空表返回空字典。
+static func extra_weapon_tier(id: String, level: int) -> Dictionary:
+	if not EXTRA_WEAPON_DEFS.has(id):
+		return {}
+	var tiers: Array = EXTRA_WEAPON_DEFS[id]["tiers"]
+	if tiers.is_empty():
+		return {}
+	var row: Dictionary = tiers[clampi(level - 1, 0, tiers.size() - 1)]
+	return row.duplicate()
+
+
+## 副武器最高等级（抽卡过滤用）。未知 id → 0。
+static func extra_weapon_max_level(id: String) -> int:
+	if not EXTRA_WEAPON_DEFS.has(id):
+		return 0
+	return int(EXTRA_WEAPON_DEFS[id]["max_level"])
+
+
+## 升级卡的卡面副标题：把该级的关键参数直接写出来，玩家才看得见成长。
+static func extra_weapon_card_text(id: String, level: int) -> String:
+	var t := extra_weapon_tier(id, level)
+	if t.is_empty():
+		return ""
+	match String(EXTRA_WEAPON_DEFS[id]["behavior"]):
+		"orbit":
+			return "%d 把 · 伤害 %.1f×攻击力 · 半径 %.0f" % [
+				int(t["count"]), float(t["dmg_mul"]), float(t["radius"])]
+		"lightning":
+			return "每 %.1fs · 伤害 %.1f× · 链 %d 个%s" % [
+				float(t["interval"]), float(t["dmg_mul"]), int(t["chains"]),
+				" · 双目标" if int(t["targets"]) > 1 else ""]
+		"ice_nova":
+			return "每 %.1fs · 半径 %.0f · 冻结 %.1fs · 伤害 %.1f×" % [
+				float(t["interval"]), float(t["radius"]), float(t["freeze"]), float(t["dmg_mul"])]
+		"acid":
+			return "每 %.1fs · 半径 %.0f · 持续 %.1fs · 每秒 %.1f×%s" % [
+				float(t["interval"]), float(t["radius"]), float(t["life"]), float(t["dps_mul"]),
+				" + 中毒" if float(t["vuln"]) > 1.0 else ""]
+		"missile":
+			return "每 %.1fs · %d 枚 · 伤害 %.1f× · 爆炸半径 %.0f" % [
+				float(t["interval"]), int(t["count"]), float(t["dmg_mul"]), float(t["blast"])]
+	return ""
+
+
 # ---- 角色特性常量（全部 [PLACEHOLDER]，来源同 WEAPON_DEFS 头注释）----
 
 ## 初心（basic）免死后的独立无敌时长（秒）。刻意长于 IFRAME_DURATION(0.5)，给足脱离时间。
 const TRAIT_SAVE_IFRAME := 1.0
+
+# ---- 局外永久强化（meta）常量（2026-09-22 扩充，全部 [PLACEHOLDER]）----
+## 复活契约（meta_revive）复活时回复的生命比例（需求：回 50% 血）。
+const META_REVIVE_HP_RATIO := 0.5
+## 复活契约复活后的无敌时长（秒）。需求写「无敌 1 秒」——与初心同值但**独立常量**，
+## 将来调一边不会连带改另一边。
+const META_REVIVE_IFRAME := 1.0
 ## 题海精进（study）每升一级永久增加的攻速（加法进 _bonus["aspd"]）。
 const TRAIT_ASPD_PER_LEVEL := 0.03
 ## 见钱眼开（finance）每层移速加成（加法叠层，非 _bonus，只做运行时 buff）。
@@ -923,9 +1139,12 @@ const SPAWN_MIN_DIST := 150.0 * SPATIAL_SCALE
 ## 过近时改到玩家周围该半径的随机角度上（H5 的 250）→ ×SPATIAL_SCALE。
 const SPAWN_RESERVE_RADIUS := 250.0 * SPATIAL_SCALE
 
-## 每波【持续投放】的窗口（秒）：只在这个窗口内出怪，最后几秒是清场时间。
-## 目的：修掉「开局一股脑全出 → 玩家清完 → 干等倒计时结束」。
-const SPAWN_WINDOW := 26.0
+## 每波【持续投放】的窗口（秒）。
+## 2026-09-21 用户需求：26 → 30，与 WAVE_DURATION 取齐 —— 整波 30 秒【全程都在出怪】，
+## 投放窗口结束即「不再生成任何敌人」，通关条件改为「投放结束后清理完场上所有敌人」。
+## 因此本波敌人总数 = SPAWN_COUNT_CAP 以内的 spawn_count(wave) 是【确定数】。
+## ⚠️ 改这个值等于改投放速率（rate = count / window），难度会跟着动 —— 调平只改这一处。
+const SPAWN_WINDOW := 30.0
 ## 场上同时存活的上限（性能保护）。达到上限时投放会暂停，怪被清掉后继续。
 ## ⚠️ 2026-09-20 用户调平：80 → 160（数量翻倍配套）。**这是性能护栏** ——
 ## 若 playtest 出现掉帧，第一个回调点就是这里（回到 100~120 之间）。
@@ -1005,7 +1224,7 @@ const SUPPORT_WANDER_MAX := 350.0
 ## Slime/Medium/Rat/Student 刻意不登记：杂鱼满场刷台词会把气泡变成噪音。
 ## 用户点名：牛马 spawn「牛来~」death 也改为「牛来~」（2026-09-20 二次指令，原「妈--妈--」）。
 const ENEMY_TAUNTS := {
-	"Elite": {"spawn": "就这就这？", "death": "我不甘心！"},
+	"Elite": {"spawn": "就这就这？", "death": "我不甘心！", "skill": {"enrage": "狂暴！"}},
 	"Ranged": {"spawn": "你瞅啥？", "death": "告辞！"},
 	"Boss": {"spawn": "本王回来了！", "death": "呱……王座没了……",
 		"skill": {"fan": "万箭齐发！", "charge": "冲鸭——！！", "summon": "孩子们，上！"}},
@@ -1029,6 +1248,76 @@ static func enemy_skill_taunt(type_name: String, skill: String) -> String:
 	var t: Dictionary = ENEMY_TAUNTS.get(type_name, {})
 	var s: Dictionary = t.get("skill", {})
 	return String(s.get(skill, ""))
+
+# ============================================================ 精英词缀（2026-09-22，需求见
+# 《精英词缀系统_给代码AI_2026-09-22.md》）
+## 精英出场时随机 roll 一个词缀（等权），改变数值 / 行为 / 死亡方式 —— 让中期波次每局不一样。
+##
+## 数值单一源就在这张表：Enemy.setup 只读表应用乘区，Battle 只读表落地死亡效果，
+## WaveDirector 只 roll 一个键。加词缀 = 往这里加一项（+ 若死亡效果是新类型，在
+## Battle._on_affix_death 加一个分支）。
+##
+## **不要词缀组合**（一只精英一个词缀）；**不要给 Boss 加词缀** —— Boss 靠三招状态机立住，
+## 叠词缀会让第 10/20 波变成不可读的随机难度。
+##
+## 美术：全部靠 modulate 叠色 + 头顶词缀名飘字实现，**不需要新贴图**。
+const ELITE_AFFIXES := {
+	"swift": {"name": "疾风", "color": Color(0.6, 0.9, 1.0), "spd_mul": 1.5},
+	"armored": {"name": "钢甲", "color": Color(0.7, 0.7, 0.7), "dmg_taken_mul": 0.5},
+	"exploder": {"name": "爆裂", "color": Color(1.0, 0.5, 0.3),
+		"death_aoe": 90.0, "death_aoe_dmg": 30.0},
+	"summoner": {"name": "召唤", "color": Color(0.7, 0.5, 1.0),
+		"summon_on_death": ["Slime", 2], "summon_hp_mul": 0.6},
+	"enraged": {"name": "狂怒", "color": Color(1.0, 0.2, 0.2),
+		"enrage_hp_ratio": 0.3, "enrage_spd_mul": 1.6, "enrage_dmg_mul": 1.5},
+}
+
+## 第 1 只精英出现的波次：更早会让教学期（波 1~4）失去「先认识杂鱼」的干净节奏。
+const ELITE_FIRST_WAVE := 5
+## [PLACEHOLDER] 精英每波数量 = 1 + floor(wave/8)（波 5~7 = 1、波 8~15 = 2、波 16~23 = 3、
+## 波 24+ = 4，无尽延续）。
+## 随波增长让后期「精英密度」自然上升，不必再额外调波池权重。
+## 【2026-09-22 质检 P2-2】旧注释档位（「5~15=1、16~23=2、24+=3」）与实现不符，已按
+## 实现改写 —— 实现侧被 _ProbeEliteAffix 锁定，若要改回「更慢」的曲线请连同探针一起改。
+static func elite_count(wave_num: int) -> int:
+	if wave_num < ELITE_FIRST_WAVE:
+		return 0
+	# 显式 floor（整数除法会触发 INTEGER_DIVISION 警告，且语义上本就要「向下取整的 1/8」）
+	return 1 + int(floorf(float(wave_num) / 8.0))
+
+
+## [PLACEHOLDER] 精英掉落金币乘区（模板 4 金 → 12 金，需求 §2.4）。
+const ELITE_GOLD_MUL := 3.0
+## [PLACEHOLDER] 精英必掉「商店券」→ 进下一家商店消费 1 张，全店 8 折（一次性）。
+const COUPON_DISCOUNT := 0.8
+## [PLACEHOLDER] 词缀底色与精灵原色的混合比例。取 1.0 = 纯词缀色会吃掉原画细节，
+## 0.6 既一眼可分（青/灰/橙红/紫/红）又保留造型辨识度。
+const AFFIX_TINT_MIX := 0.6
+## [PLACEHOLDER] 狂怒进入狂暴后的底色脉冲周期（秒）。
+const AFFIX_PULSE_PERIOD := 0.5
+
+
+## 词缀定义查询（缺键返回空字典 —— 调用方只需判空，"无词缀" 是正常状态）。
+static func elite_affix(affix_id: String) -> Dictionary:
+	return ELITE_AFFIXES.get(affix_id, {})
+
+
+## 随机 roll 一个词缀 id（等权）。只有 WaveDirector 生成精英时调用。
+static func roll_elite_affix() -> String:
+	var keys := ELITE_AFFIXES.keys()
+	if keys.is_empty():
+		return ""
+	return String(keys[randi() % keys.size()])
+
+
+## 词缀名（头顶飘字用）。缺键返回空串（调用方空串即静默）。
+static func elite_affix_name(affix_id: String) -> String:
+	return String(elite_affix(affix_id).get("name", ""))
+
+
+## 词缀色（头顶飘字色 + 精灵底色）。缺键 = 白（等于「不改色」）。
+static func elite_affix_color(affix_id: String) -> Color:
+	return Color(elite_affix(affix_id).get("color", Color(1, 1, 1)))
 
 # ============================================================ 升级选项池（H5 UPGRADE_POOL + 拾取范围）
 

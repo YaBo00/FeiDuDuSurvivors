@@ -23,6 +23,12 @@ func setup(p_rect: Rect2) -> void:
 	s.size = p_rect.size
 	if _shape != null:
 		_shape.shape = s
+	# 【2026-09-21 用户拍板：楼暂时【无碰撞】（纯视觉点缀）】墙+楼夹缝 / 纯法向撞楼
+	# 无切向可滑，把自动驾驶物理卡死在原地 4595s（真人在贴墙走位时同样可能被夹）。
+	# layer/mask 清零后玩家与敌人的 mask 匹配不到任何层 → move_and_slide 直接穿过。
+	# 恢复实体碰撞 = 删掉下面两行，并同步恢复 Enemy 里 _resolve_obstacles 的调用。
+	collision_layer = 0
+	collision_mask = 0
 	queue_redraw()
 
 

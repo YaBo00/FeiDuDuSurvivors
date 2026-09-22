@@ -32,11 +32,15 @@ enum State { FIGHTING, UPGRADE, SHOP, RESULT }
 # ---------------------------------------------------------------- 自检参数
 const SELFTEST_TIME_SCALE := 6.0
 const SELFTEST_TICKS := 360          # 与 time_scale 配合，保持单步 delta ≈ 1/60
-## 自检允许的最长【游戏内】时长。20 波 × 30s = 600s，留出余量。
-const SELFTEST_MAX_GAME_TIME := 900.0
-## 无尽自检（--selftest --endless）跑 ENDLESS_SELFTEST_WAVES（40）波 ≈ 1200s，
-## 900s 会误判「自检超时」→ 单独给一个更宽的上限。
-const ENDLESS_SELFTEST_MAX_GAME_TIME := 1800.0
+## 自检允许的最长【游戏内】时长。
+## 2026-09-21 波次节奏改版（30s 投放 + 清场制通关）后重校准：单波时长不再固定 30s，
+## 而是 30s 投放 + 清场尾（残局扫描普遍 30~90s，随波数增长）。旧上限 900s 是按
+## 「20 波 × 30s = 600s」校准的，清场制下 20 波实测必然跑不满 → 提到 2400s。
+const SELFTEST_MAX_GAME_TIME := 2400.0
+## 无尽自检（--selftest --endless）跑 ENDLESS_SELFTEST_WAVES（40）波。清场制下
+## 波 21+ 每波 240+ 只，清场尾远长于投放期 —— 旧上限 1800s 必然超时。
+## 按 40 波 ×（30s 投放 + 60~100s 清场）≈ 3600~5200s 校准到 5400s。
+const ENDLESS_SELFTEST_MAX_GAME_TIME := 5400.0
 
 const ENEMY_SCENE := preload("res://scenes/entities/Enemy.tscn")
 const PROJECTILE_SCENE := preload("res://scenes/entities/Projectile.tscn")
@@ -69,6 +73,9 @@ var feedback: BattleFeedback = null
 var wave: WaveDirector = null
 ## 战斗结算模块
 var combat: CombatResolver = null
+## 副武器系统（2026-09-22）：局内可获得/升级的第二、第三把武器。
+## 与主角武器独立冷却、独立开火；状态由 Battle 持有 ⇒ 每局 start_run 清空。
+var extra: ExtraWeaponSystem = null
 
 var state: int = State.FIGHTING
 var wave_num: int = 0
@@ -95,6 +102,10 @@ var obstacles: Array[Obstacle] = []
 ## 本局已购商店道具（A4 前置解锁链）：进阶道具只在前置已购时上架。
 ## 探针可直读直写（Battle 黑板惯例）；start_run 清零。
 var items_owned: Array[String] = []
+
+## 本次商店是否已消费「商店券」（精英掉落，全店 8 折；2026-09-22 词缀系统）。
+## 每次开店时按 Player.shop_coupon 重算 —— 不清零的旧值绝不允许跨店残留。
+var _coupon_active := false
 ## 建筑物矩形缓存。敌人不用物理体，靠这批矩形做数学推出（见 Enemy._resolve_obstacles）。
 var obstacle_rects: Array[Rect2] = []
 
@@ -107,6 +118,8 @@ var _current_options: Array = []
 var _current_reason := ""
 var _upgrade_queue: Array[String] = []
 var _game_time := 0.0
+## 清场阶段已等待的秒数（仅测试模式用于观测打印，2026-09-21 新波次节奏）。
+var _wave_clear_wait := 0.0
 var _def_probe_ok := false
 var _nan_seen := false
 var _def_seen_bad := false
@@ -238,6 +251,11 @@ func _ready() -> void:
 	combat.shake_requested.connect(shake)
 	combat.hitstop_requested.connect(_hitstop_brief)
 	combat.player_died.connect(_on_player_died)
+	# 副武器系统（2026-09-22）：与 CombatResolver 同一种组合方式（new + add_child + setup）。
+	# 必须在 start_run() 之前建好 —— start_run 里的 extra.reset() 要用到它。
+	extra = ExtraWeaponSystem.new()
+	add_child(extra)
+	extra.setup(self)
 	# 相机：拉近（视角缩到一半）+ 限制在地图内。
 	# 跟随玩家在 _physics_process 里做；limit_* 让镜头到地图边缘自动停住。
 	camera.zoom = Vector2(GameStats.CAMERA_ZOOM, GameStats.CAMERA_ZOOM)
@@ -250,11 +268,12 @@ func _ready() -> void:
 	add_child(audio)
 	GameAudio.play_bgm.call_deferred(get_tree())
 	player.died.connect(_on_player_died)
+	# 复活契约（2026-09-22 meta 扩充）：Player 管血量/无敌，**清场与演出归 Battle**。
+	player.meta_revived.connect(_on_meta_revived)
 	# 商店购买必须走真实 UI 链路：面板点击 → purchased 信号 → 这里校验扣款。
 	# 【2026-09-19 修复的严重 bug】这条线此前从未接上——点商品只 emit 没人听，
 	# 购买静默无效；而门禁探针直接调 _on_shop_purchased 绕过了断点，所以一直全绿。
 	shop_panel.purchased.connect(_on_shop_purchased)
-	pause_menu.resumed.connect(func(): pass)
 	pause_menu.restart_requested.connect(func():
 		start_run()
 	)
@@ -333,6 +352,7 @@ func start_run() -> void:
 		_speed_btn.visible = true
 	wave.reset()
 	combat.reset()
+	extra.reset()     # 副武器每局清空（不继承上一局，也不继承 meta）
 	_themes_seen.clear()
 	feedback.reset()
 	_hitstop_gen += 1
@@ -343,15 +363,17 @@ func start_run() -> void:
 	_max_proc_at = -1.0
 	_phys_sum = 0.0
 	_phys_ticks = 0
-	player.reset(GameStats.ARENA_CENTER)
 	# 局外永久强化注入（MetaSave 消费端第二片）。守卫三重：
 	# ① _testing()：自检/平衡/失败路径要确定性基线，绝不带局外加成；
 	# ② 探针进程（--script 模式）：门禁探针的数值断言（DPS/血量端到端等）全部
 	#    基于无 meta 基线 —— 用户一旦买了强化就会污染门禁，探针进程一律不注入；
-	# ③ 注入后强制 recalc（幂等）：确保 meta 乘区真的进到本次战斗数值里。
+	# ③ ⚠️【注入必须早于 player.reset()】（2026-09-22 meta 扩充修正）：reset() 内部的
+	#    recalc + `hp = max_hp` 是开局数值的唯一收口点。旧顺序（先 reset 再注入）
+	#    会让买了「生命强化 +20」的玩家每局开局停在【旧上限】的残血（100/120）。
+	#    早注入 ⇒ 首次 recalc 就带满 meta 乘区，生命/攻速/暴击/启动资金一次到位。
 	if not _testing() and not _probe_process():
 		player.meta_bonus_dict = MetaSave.meta_bonus()
-		player.recalc_stats()
+	player.reset(GameStats.ARENA_CENTER)
 	player.set_physics_process(true)
 	spawn_obstacles_via_wave()
 	result_panel.hide_panel()
@@ -380,6 +402,10 @@ func spawn_obstacles_via_wave() -> void:
 
 ## 波次开始后的反馈（横幅 + 音效）—— 由 WaveDirector.wave_started 信号触发。
 func _on_wave_started(wave_no: int, subtitle: String) -> void:
+	# 清场等待计时按波归零（2026-09-21）：之前只在 _tick_fighting 里累加从不清零，
+	# [WAVE-DBG] 打出的「波 N 清场等待 X 秒」是跨波累计值，取证语义失真（会把
+	# 上一波的卡顿时间算进这一波）。
+	_wave_clear_wait = 0.0
 	feedback.show_wave_banner(wave_no, subtitle)
 	if audio != null:
 		audio.play("wave", -6.0)
@@ -468,7 +494,11 @@ func visible_world_size() -> Vector2:
 
 
 ## 受击反馈震屏（Camera2D.offset 抖动）。纯视觉，不参与任何判定。
+## 震屏开关（2026-09-22 设置菜单）：关掉后所有震屏请求直接跳过 —— 受击/击杀/进化/Boss 狂暴
+## 全部不再抖屏。读的是 MetaSave 缓存值，热路径零文件 IO。
 func shake(strength: float = GameStats.SHAKE_STRENGTH) -> void:
+	if not bool(MetaSave.get_setting("screen_shake")):
+		return
 	_shake_strength = strength
 	_shake_time = GameStats.SHAKE_DURATION
 
@@ -531,24 +561,64 @@ func _tick_fighting(delta: float) -> void:
 	# 失败路径自检冻结波次计时：杜绝「苟活到波末→升级→通关」这条非确定性路径。
 	if not selftest_defeat:
 		wave_timer -= delta
-		if GameStats.is_boss_wave(wave_num):
-			# Boss 波（2026-09-20 需求 §2.1）：30 秒倒计时不再触发结算 —— wave_timer
-			# 只负责驱动投放窗口（tick_spawn），波的推进条件改为【Boss 死亡】。
-			if not _has_alive_boss():
+		# ⚠️【窗口关闭当帧的收尾投放，必须在清场判定之前】：投放走累加器，末帧的
+		# 小数余数永远等不到下一帧（窗口已关），不补投就会每波少一只（计划 42 → 实投 41）。
+		# 放在这里 = 「本波该出多少只」在进入清场阶段前就已全部落地，之后只减不增。
+		wave.flush_pending_spawn()
+		# ⚠️【清场判定必须早于 tick_spawn】：窗口关闭与「场上还有怪」可能发生在同一帧
+		# （窗口末尾那一帧还会放怪）。若先 tick_spawn 再判定，那只刚放出来的怪要等到
+		# 下一帧才被看见 —— 中间夹着的 wave.end_wave() → 升级面板会把整棵树的
+		# physics 停掉，判定再也没有机会跑，玩家就卡死在「条 0%、没怪、不推进」。
+		# 先判定则末帧放怪后立刻进入清场阶段，逻辑闭合。
+		if wave.spawn_window_closed():
+			# 投放窗口已结束（本波不再生成敌人）。通关条件（2026-09-21 用户需求）：
+			#   · 普通波 —— 清理完场上所有敌人即通过
+			#   · Boss 波 —— Boss 死亡即通过（Boss 是场上唯一目标；旧语义保留）
+			# 两者都是「清空即可」，故统一判定 _wave_cleared()，不再有「活到 30 秒」这条路。
+			if _testing() and not _wave_cleared():
+				_wave_clear_wait += delta
+				# 每 5 秒打一行（曾用 0.5 秒 → 单次自检日志 1300+ 行，噪音太大）。
+				# 这条是「清场是否卡死」的唯一现场证据：数字长时间不变 = 死锁。
+				if int(_wave_clear_wait / 5.0) != int((_wave_clear_wait - delta) / 5.0):
+					var line: String = "[WAVE-DBG] 波%d 清场等待 %.1fs：场上 %d 只（timer=%.1f）" % [
+						wave_num, _wave_clear_wait, enemies.size(), wave_timer]
+					# 等待 ≥20s → 疑似卡死，附残敌取证（类型/行为/与玩家距离）——
+					# 在真实自检环境里定位「最后几只打不到」的机制（--script 直启
+					# Battle 会缺自检链路冻结在波 1，取证只能内嵌在这里）。
+					if _wave_clear_wait >= 20.0:
+						var det: String = ""
+						var k := 0
+						for e in enemies:
+							if not is_instance_valid(e) or e.is_dead:
+								continue
+							det += " %s(%s,d%.0f,hp%d)" % [e.type_name, e.behavior,
+								player.global_position.distance_to(e.global_position), e.hp]
+							k += 1
+							if k >= 6:
+								break
+						line += " 残敌:" + det
+						# 玩家侧现场（2026-09-21）：残局打不死 = 「没开火」或「开了火没命中」，
+						# 五个数字足以分辨：proj数（弹道是否在生成/回收）、命中表（去重表是否
+						# 异常膨胀）、kills（弹道系统整局是否工作过）、攻击冷却、当前射程。
+						line += " | 玩家(%.0f,%.0f) proj=%d 表=%d kills=%d atk_t=%.2f rng=%.0f" % [
+							player.global_position.x, player.global_position.y,
+							projectiles.size(), combat._proj_hits.size(),
+							kills, player.attack_timer, player.attack_range]
+					print(line)
+			if _wave_cleared():
 				wave.end_wave()
 				return
-			# 测试模式兜底：selftest/balance 的无敌/自动驾驶玩家可能打不死动态血
-			# Boss，投放窗口结束后再观察 BOSS_WAVE_TEST_GRACE 秒仍无果就放行，
-			# 保证流程门禁不卡死。正常游玩没有这条 —— Boss 不死波就不结束。
-			if _testing() and wave_timer <= GameStats.WAVE_DURATION - GameStats.SPAWN_WINDOW \
+			# Boss 波测试模式兜底：selftest/balance 的无敌/自动驾驶玩家可能打不死动态血
+			# Boss（血量随 hp_scale 涨到波 20 的数万），窗口结束后再观察
+			# BOSS_WAVE_TEST_GRACE 秒仍无果就放行，保证流程门禁不卡死。
+			# 正常游玩【没有】这条 —— Boss 不死波就不结束。
+			if _testing() and _has_alive_boss() \
+					and wave_timer <= GameStats.WAVE_DURATION - GameStats.SPAWN_WINDOW \
 					- GameStats.BOSS_WAVE_TEST_GRACE:
 				print("[%s] Boss 波 #%d 兜底推进（Boss 未被击杀，测试观察期已过）" % [
 					_test_tag(), wave_num])
 				wave.end_wave()
 				return
-		elif wave_timer <= 0.0:
-			wave.end_wave()
-			return
 
 	wave.tick_spawn(delta)
 
@@ -561,6 +631,10 @@ func _tick_fighting(delta: float) -> void:
 	combat.cleanup_enemies()
 	wave.live_max = maxi(wave.live_max, enemies.size())
 	combat.space_and_separate()
+	# 副武器推进（2026-09-22）：放在 cleanup_enemies 与网格重建【之后】——
+	# ① 本帧已死的敌人不会被飞刃/闪电再打一次；② 击杀侧效统一由 cleanup 结算，
+	# 副武器只负责「谁掉血」，不重复实现掉落/飘字规则。
+	extra.update(delta)
 	feedback.update_floats(delta)
 	_tick_enemy_taunts()
 	# 记录脚本每帧成本的峰值（毫秒）
@@ -581,6 +655,10 @@ func _tick_fighting(delta: float) -> void:
 	if _hud_timer <= 0.0:
 		_hud_timer = HUD_INTERVAL
 		hud.set_data(player, wave_num, wave_timer, GameStats.WAVE_COUNT)
+	# 清场进度条逐帧刷新（2026-09-21）：它是 HUD 里唯一要求帧级实时的元素 ——
+	# 杀一只怪要立刻看到条涨，而 set_data 走的是 HUD_INTERVAL 节拍（会明显滞后一拍）。
+	# 读 WaveDirector 的比值而不是自己算，保证与关内判定 _wave_cleared() 同源。
+	hud.set_clear_ratio(wave.wave_clear_ratio())
 	_maybe_open_queued_upgrade()
 
 
@@ -647,6 +725,15 @@ func _tick_enemy_taunts() -> void:
 			taunt_lines_shown += 1
 			feedback.spawn_float(e.global_position + Vector2(0.0, -e.radius * 2.6),
 				line, Color(0.95, 0.95, 1.0), false)
+		# 精英词缀名（2026-09-22 词缀系统）：与入场台词共用这一次可视检测，在台词上方
+		# 再冒一个小字标签，颜色 = 词缀色 ⇒ 玩家能把「青色 = 疾风 / 灰 = 钢甲」对上号。
+		# 只在有词缀时冒（普通怪 / Boss 恒无），且每只一次（复用 taunt_done 语义）。
+		if e.affix != "":
+			var an := GameStats.elite_affix_name(e.affix)
+			if an != "":
+				feedback.spawn_float(
+					e.global_position + Vector2(0.0, -e.radius * 2.6 - 20.0),
+					an, GameStats.elite_affix_color(e.affix), false)
 
 
 ## 台词气泡（放招/事件喊话）：位置由发射方按头顶偏移算好，这里只管播。
@@ -661,6 +748,18 @@ func _has_alive_boss() -> bool:
 		if is_instance_valid(e) and not e.is_dead and e.behavior == "boss":
 			return true
 	return false
+
+
+## 本波是否已清空（通关条件，2026-09-21 用户需求）。
+## 与 WaveDirector.wave_clear_ratio() 同源：两者读同一组计数（enemies + 本波击杀），
+## 所以「进度条走到 100%」与「真的过关」在定义上不可能打架。
+## 只有 is_dead 才算死 —— queue_free 是【延迟释放】，清理要等 CombatResolver.cleanup_enemies()
+## 在本帧稍后跑，用 is_instance_valid 判会被已标记死亡但尚未释放的怪骗过去。
+func _wave_cleared() -> bool:
+	for e in enemies:
+		if is_instance_valid(e) and not e.is_dead:
+			return false
+	return true
 
 
 ## Boss 半血狂暴（2026-09-20 需求 §2.3）：震屏 + 屏幕中央大字 + 爆裂 + 低沉音效。
@@ -692,6 +791,67 @@ func _on_splitter_death(pos: Vector2) -> void:
 		var ang := TAU * float(i) / float(GameStats.SPLITTER_CHILD_COUNT) + 0.6
 		var p: Vector2 = pos + Vector2(cos(ang), sin(ang)) * 18.0
 		wave.spawn_enemy("Rat", p, GameStats.SPLITTER_CHILD_HP_MUL, false)
+
+
+## 精英词缀的死亡效果（2026-09-22 词缀系统）。Enemy 只发信号（它不持 player / enemies），
+## 实际结算在这里 —— 与 splitter 分裂、Boss 召唤同一分工。
+## 不认识的词缀（swift/armored/enraged）在这里无事可做：它们的效果全在生存期。
+func _on_affix_death(pos: Vector2, affix: String) -> void:
+	var d := GameStats.elite_affix(affix)
+	if d.is_empty():
+		return
+	match affix:
+		"exploder":
+			_explode_at(pos, d)
+		"summoner":
+			_summon_on_death(pos, d)
+
+
+## 爆裂词缀：死亡点爆一个 death_aoe 半径的圈，对圈内玩家造成 death_aoe_dmg 点伤害。
+##
+## 【可走位躲】伤害在死亡瞬间判一次距离 —— 站圈里就吃，站圈外（或死在远处）不吃。
+## 视觉上画出实际半径的红圈 0.3s：玩家据此建立「圈 = 伤害范围」的读感。
+##
+## 伤害口径：走 Player.take_hit —— 与接触伤害/敌弹完全同一条路（闪避 / 无敌帧 /
+## 护盾 / 护甲减免全都照常生效），需求文档 §3 明确要求「吃无敌帧」。
+## 难度乘区在此处收口：只有这里不是「模板 dmg × 波次曲线」（那会把 30 点卷到几百点），
+## 所以按 DIFFICULTIES.dmg_mul 手工乘一次（普通 ×1.0 = 30，困难 ×1.3 = 39）。
+func _explode_at(pos: Vector2, d: Dictionary) -> void:
+	var r := float(d.get("death_aoe", 0.0))
+	var dmg := maxi(1, roundi(float(d.get("death_aoe_dmg", 0.0))
+		* float(GameStats.difficulty_def()["dmg_mul"])))
+	var blast := AffixBlast.new()
+	world.add_child(blast)
+	blast.fire(pos, r, GameStats.elite_affix_color("exploder"))
+	_on_sfx_requested("kill", -3.0, 0.55)
+	shake(GameStats.SHAKE_STRENGTH * 0.9)
+	if player.global_position.distance_to(pos) > r:
+		return
+	var res: Dictionary = player.take_hit(dmg)
+	var result := String(res["result"])
+	if result == "hit" or result == "dead":
+		feedback.spawn_float(player.global_position + Vector2(0, -44.0),
+			"-%d" % int(res["dmg"]), Color(1.0, 0.35, 0.30), false)
+	if result == "dead":
+		_on_player_died()
+
+
+## 召唤词缀：死亡时在原地生成 N 只 Slime（默认 2 只、60% 血）。
+##
+## 与 splitter 分裂同口径：**不占** spawn_remaining 名额（清场进度分母不被撑破），
+## 同屏 cap 天然生效（它们确实进了 enemies 数组）；enforce_spawn_dist = false ——
+## 生在尸位旁是预期（玩家刚把精英打死就站在旁边）。
+func _summon_on_death(pos: Vector2, d: Dictionary) -> void:
+	var pair: Array = d.get("summon_on_death", [])
+	if pair.size() < 2:
+		return
+	var t := String(pair[0])
+	var n := maxi(1, int(pair[1]))
+	var hp_mul := float(d.get("summon_hp_mul", 1.0))
+	for i in n:
+		var ang := TAU * float(i) / float(n) + 0.6
+		var p: Vector2 = pos + Vector2(cos(ang), sin(ang)) * 22.0
+		wave.spawn_enemy(t, p, hp_mul, false)
 
 
 ## 班长（support）光环脉冲（2026-09-20）：heal=false → 给 150px 内友军临时提速
@@ -739,6 +899,23 @@ func _on_player_died() -> void:
 		_end_run(false)
 
 
+## 复活契约触发（2026-09-22 meta 扩充）：Player 已回满 50% 血 + 1s 无敌，这里补两件事 ——
+## ① 清场（需求 §2.2 明确要求）：玩家刚在怪堆里复活，不清场下一帧就再被围死。
+## ② 演出：与武器进化同规格的播报（大字 + 震屏 + 双音效），让「契约生效」不可错过。
+##
+## ⚠️ 清场走 call_deferred —— 本回调是**从 take_hit 内部同步发出的**，触发链可能是
+## `contact_damage()` / `process_projectiles()` 的遍历中途；就地 mutate `enemies`/`_grid`
+## 会让调用方手里那个 Array 与本回合一帧内的世界不一致。延到本帧末再清，语义不变（无敌 1s 兜底）。
+func _on_meta_revived() -> void:
+	call_deferred("_free_all_enemies")   # 见上方 ⚠️：延到本帧末再 mutate 敌人数组
+	feedback.spawn_float(player.global_position + Vector2(0.0, -70.0),
+		"复活契约！", Color(0.62, 0.92, 1.0), true)
+	shake()
+	feedback.play_evolution_nova(player.global_position)
+	_on_sfx_requested("levelup", -3.0, 0.8)
+	_on_sfx_requested("coin", -3.0, 0.9)
+
+
 # ================================================================ 升级 / 商店
 func _maybe_open_queued_upgrade() -> void:
 	if state == State.FIGHTING and not _upgrade_queue.is_empty():
@@ -777,7 +954,7 @@ func _generate_options() -> void:
 				opt["cost"] = cost
 		avail.append(opt)
 	avail.shuffle()
-	# 选项数 = 基础值 + 角色天赋加成（学习豪 +1）+ 预知未来额外选项（2026-09-20 扩充，
+	# 选项数 = 基础值 + 角色天赋加成（学习嘉豪 +1）+ 预知未来额外选项（2026-09-20 扩充，
 	# 与天赋叠加；消费后清零 —— 「下次升级」语义）。
 	var extra_cards: int = player.extra_card_pending
 	if extra_cards > 0:
@@ -785,6 +962,21 @@ func _generate_options() -> void:
 	var count := GameStats.UPGRADE_OPTIONS \
 		+ int(GameStats.character(player.char_id)["upgrade_opt_bonus"]) + extra_cards
 	var pick: Array = avail.slice(0, mini(count, avail.size()))
+	# ---- 副武器卡（2026-09-22）----
+	# 规则（需求文档 §1.3 / §3）：未持有且未满 2 把 → 出「获得」卡；已持有且未满级 →
+	# 出「升级」卡；持满 2 把后不再出获得卡；某把满级后它的升级卡消失。
+	# 出现率约 EXTRA_WEAPON_CARD_RATE，用【替换】实现：若改成追加进 13 张的池子里再抽 3 张，
+	# 单卡命中率只有 ~23%；替换才是稳定的 1/3（与武器精通的 0.34 同一思路）。
+	var wcards := _extra_weapon_cards()
+	# 副武器卡占用的槽位下标；-1 = 本张没出（质检 P2-3，2026-09-22）：
+	# 下面武器精通的补卡若 randi 恰好落在这个槽，会把 cost_tier 3 的稀有卡白顶掉。
+	# 修法 = 预筛槽位后从中选——随机数消耗与旧版完全一致（各分支仍是 1 次 randi），
+	# 自检随机序列逐位不变，只有「精通落槽分布」不再覆盖副武器卡槽。
+	var wslot := -1
+	if not wcards.is_empty() and not pick.is_empty() \
+			and randf() < GameStats.EXTRA_WEAPON_CARD_RATE:
+		wslot = randi() % pick.size()
+		pick[wslot] = wcards[randi() % wcards.size()]
 	# 武器进化可达性升级（2026-09-20，用户拍板全选四方案之二）：
 	# 卡池 12 条均匀抽 3，武器精通单次出现率仅 25%，实测多数局凑不满 6 层 —— 进化形同虚设。
 	#   A. 波末保底：未进化时每波波末必含一张武器精通（选不选仍由玩家决定）；
@@ -802,10 +994,18 @@ func _generate_options() -> void:
 					in_pick = true
 					break
 			if not in_pick:
-				if _current_reason == "wave":
-					pick[randi() % pick.size()] = mastery
+				# 可落槽位 = 全部槽位 − 副武器卡占的槽（wslot == -1 时即全部，
+				# 与旧版 randi() % pick.size() 逐位同分布）。随机数消耗不变。
+				var slots: Array[int] = []
+				for i in pick.size():
+					if i != wslot:
+						slots.append(i)
+				if slots.is_empty():
+					pass   # 防御：只剩副武器卡一个槽时放弃补卡（实际不可能，UPGRADE_OPTIONS≥3）
+				elif _current_reason == "wave":
+					pick[slots[randi() % slots.size()]] = mastery
 				elif _current_reason == "level" and randf() < 0.34:
-					pick[randi() % pick.size()] = mastery
+					pick[slots[randi() % slots.size()]] = mastery
 	# 武器精通卡携带进化进度（2026-09-20 用户需求：选卡时看得见叠了几层）。
 	# 等级路径的 opt 是 const 表引用 → 必须 duplicate 后再挂键。
 	for i in pick.size():
@@ -816,6 +1016,51 @@ func _generate_options() -> void:
 		o["mastery_progress"] = int(player.weapon_level)
 		pick[i] = o
 	_current_options = pick
+
+
+## 副武器升级卡（2026-09-22）。
+## 返回当前【合法】的卡（获得 + 升级两类），空数组 = 一张都出不了。
+## 过滤规则：
+##   · 未持有 + 未持满 MAX_EXTRA_WEAPONS → 「获得」卡（cost_tier 3，稀有）
+##   · 已持有 + 未满级                  → 「升级」卡（cost_tier 2）
+##   · 持满 2 把                        → 不再出「获得」卡（升级卡照出）
+##   · 某把已满级                        → 该武器的升级卡消失
+## 卡面文案走 display 字段（UpgradePanel 优先读它）——「获得」与「升级」的语义
+## 与普通属性卡的「+N」完全不同，用通用格式化会显示成「+0」。
+func _extra_weapon_cards() -> Array:
+	var out: Array = []
+	var full: bool = extra.owned_count() >= GameStats.MAX_EXTRA_WEAPONS
+	for id in GameStats.EXTRA_WEAPON_IDS:
+		var wid := String(id)
+		var wname := String(GameStats.EXTRA_WEAPON_DEFS[wid]["name"])
+		var wdesc := String(GameStats.EXTRA_WEAPON_DEFS[wid]["desc"])
+		var lvl := extra.level_of(wid)
+		var card: Dictionary = {}
+		if lvl <= 0:
+			if full:
+				continue
+			card = {
+				"id": "w_%s_gain" % wid, "name": wname, "kind": "new_weapon",
+				"weapon_id": wid, "cost_tier": 3, "pct": false,
+				"tiers": [0.0, 0.0, 0.0],
+				"display": "获得副武器　·　%s" % wdesc,
+			}
+		elif lvl < GameStats.extra_weapon_max_level(wid):
+			card = {
+				"id": "w_%s_lvl" % wid, "name": "%s Lv%d" % [wname, lvl + 1],
+				"kind": "level_weapon", "weapon_id": wid, "cost_tier": 2, "pct": false,
+				"tiers": [0.0, 0.0, 0.0],
+				"display": GameStats.extra_weapon_card_text(wid, lvl + 1),
+			}
+		else:
+			continue   # 已满级：升级卡消失（文档 §3）
+		# 波末卡同样捆绑「敌人代价」（与普通卡同一套档位分配；纯读叠层，不写状态）
+		if _current_reason == "wave":
+			var cost: Dictionary = _pick_enemy_cost(int(card["cost_tier"]))
+			if not cost.is_empty():
+				card["cost"] = cost
+		out.append(card)
+	return out
 
 
 ## 按升级条目的档位取一个可用代价：本档叠层满则就近降/升档找，
@@ -855,10 +1100,24 @@ func enemy_cost_dmg_mult() -> float:
 
 
 ## 波末商店：暂停游戏，玩家花金币买道具；离开后进下一波。
+## 本次商店的实际价格乘区 = 角色/道具折扣（player.shop_discount）× 商店券 8 折。
+## 只此一个出口：开店与「刷新道具」重抽都读它 ⇒ 同一家店里所有卡（含重抽上来的）
+## 用的是同一个折扣，不会出现「买一张后折扣消失、后面恢复原价」。
+func _shop_discount_now() -> float:
+	return player.shop_discount * (GameStats.COUPON_DISCOUNT if _coupon_active else 1.0)
+
+
 func _open_shop() -> void:
 	state = State.SHOP
 	get_tree().paused = true
-	shop_panel.open(wave_num, player.gold, player.shop_discount, _on_shop_closed, _testing(), items_owned,
+	# 精英「商店券」（2026-09-22 词缀系统）：进店消费 1 张 → 本次全店 8 折。
+	# 消费点放在【开店这一刻】而不是购买时，理由见 _shop_discount_now。
+	if player.shop_coupon > 0:
+		player.shop_coupon -= 1
+		_coupon_active = true
+	else:
+		_coupon_active = false
+	shop_panel.open(wave_num, player.gold, _shop_discount_now(), _on_shop_closed, _testing(), items_owned,
 		player.weapon_level)
 
 
@@ -873,7 +1132,7 @@ func _on_shop_purchased(item_id: String, price: int, index: int) -> void:
 	# 「刷新」道具（2026-09-20 商店扩充）：整批商品重抽 —— 不锁卡（新商品上来）、
 	# 已扣的钱不退；重抽沿用当前折扣与前置链状态。其余道具照旧锁卡防重复购买。
 	if item_id == "s_reroll":
-		shop_panel.reroll(player.shop_discount, items_owned, player.weapon_level)
+		shop_panel.reroll(_shop_discount_now(), items_owned, player.weapon_level)
 	else:
 		shop_panel.mark_sold(index)
 	if audio != null:
@@ -888,7 +1147,26 @@ func _on_shop_closed() -> void:
 
 
 func _on_upgrade_chosen(opt: Dictionary, _index: int) -> void:
-	player.apply_upgrade(opt["id"], GameStats.upgrade_value(opt, wave_num))
+	# 副武器卡（2026-09-22）走自己的入口：它们不改属性，而是「获得 / 升一级」，
+	# 由 ExtraWeaponSystem 持有。kind 缺失（普通卡）时落默认分支，行为逐位不变。
+	match String(opt.get("kind", "")):
+		"new_weapon":
+			var wid := String(opt["weapon_id"])
+			# 选完立刻给一次战场飘字反馈：副武器是持续生效的，不给反馈的话
+			# 玩家只能靠「屏幕上多了个绕圈的东西」才发现自己拿了什么。
+			if extra.grant(wid):
+				feedback.spawn_float(player.global_position + Vector2(0.0, -58.0),
+					"获得副武器：%s" % String(GameStats.EXTRA_WEAPON_DEFS[wid]["name"]),
+					Color(1.0, 0.85, 0.35), true)
+		"level_weapon":
+			var wid2 := String(opt["weapon_id"])
+			if extra.level_up(wid2):
+				feedback.spawn_float(player.global_position + Vector2(0.0, -58.0),
+					"%s Lv%d" % [String(GameStats.EXTRA_WEAPON_DEFS[wid2]["name"]),
+						extra.level_of(wid2)],
+					Color(1.0, 0.85, 0.35), true)
+		_:
+			player.apply_upgrade(opt["id"], GameStats.upgrade_value(opt, wave_num))
 	upgrade_taken_count += 1
 	# 「敌人代价」侧（A1 双向投票）：玩家拿增益的同时敌人也成长（只在波末捆绑，见 _generate_options）
 	if opt.has("cost"):

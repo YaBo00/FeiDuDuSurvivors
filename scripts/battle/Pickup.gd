@@ -9,6 +9,9 @@ const KIND_XP := "xp"
 ## 图标暂用图元占位（红白马蹄形，与金币/经验圆点一眼可分）；美术图到位后在 AssetDB.DROPS 加
 ## "magnet" 键即可自动切换，本文件不用改。
 const KIND_MAGNET := "magnet"
+## 商店券（2026-09-22 精英词缀系统）：精英必掉，拾取后下一家商店全店 8 折。
+## 需求 §2.4 允许「图标用现有金色方块即可」⇒ 不新增贴图，走图元占位画法（金色方票）。
+const KIND_COUPON := "coupon"
 
 ## 掉落物图标的显示高度（px）。[PLACEHOLDER] 未 playtest。
 ## 拾取半径只有 6，图标太小会看不见，所以显示得比判定范围大一些。
@@ -44,8 +47,8 @@ func _setup_visuals() -> void:
 		return
 	var t := AssetDB.drop(kind)
 	if t == null:
-		# 磁铁的图元占位是【常态】而非缺资源事故（图标还没画），不 push_warning 刷屏
-		if kind != KIND_MAGNET:
+		# 磁铁 / 商店券的图元占位是【常态】而非缺资源事故（刻意不画图标），不 push_warning 刷屏
+		if kind != KIND_MAGNET and kind != KIND_COUPON:
 			push_warning("Pickup: 类型 '%s' 的美术资源缺失，使用图元占位画法" % kind)
 		return
 	sprite.texture = t
@@ -84,5 +87,14 @@ func _draw() -> void:
 		draw_arc(Vector2.ZERO, radius * 0.85, PI * 1.25, PI * 1.75, 12,
 			Color(0.9, 0.2, 0.2, alpha), radius * 0.55, true)
 		draw_circle(Vector2.ZERO, radius * 0.35, Color(1, 1, 1, alpha))
+	elif kind == KIND_COUPON:
+		# 商店券：金色方票 + 白斜杠。方形与金币（圆）/磁铁（马蹄）一眼可分，
+		# 「这张不是钱，是打折凭证」靠形状就能读懂。
+		var h := radius * 1.6
+		var sq := Rect2(Vector2(-h * 0.5, -h * 0.5), Vector2(h, h))
+		draw_rect(sq, Color(1.0, 0.78, 0.16, alpha), true)
+		draw_rect(sq, Color(1.0, 0.96, 0.72, alpha), false, 1.5)
+		draw_line(Vector2(-h * 0.2, h * 0.2), Vector2(h * 0.2, -h * 0.2),
+			Color(1, 1, 1, alpha * 0.9), 2.0, true)
 	else:
 		draw_circle(Vector2.ZERO, radius * 0.85, Color(0.0, 0.75, 1.0, alpha))

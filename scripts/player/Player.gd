@@ -18,6 +18,10 @@ signal stats_changed
 ## 武器进化瞬间发出（2026-09-20 可达性升级）：参数 = 形态名（如「连珠·二重奏」）。
 ## Battle 监听它做全屏播报（大号金字 + 震屏 + 音效）—— 进化是本作核心成长节点，必须有演出感。
 signal evolved(form_name: String)
+## 局外「复活契约」救回玩家时发出（2026-09-22 meta 扩充）。Battle 监听它做清场 + 播报。
+## 与「初心」「复活币」不同：契约的演出是**清场级**的（需求 §2.2 明确要求清场），
+## 而 Player 不持有敌人数组 ⇒ 必须交给 Battle 执行。
+signal meta_revived
 
 ## 自检模式下的自动驾驶开关（由 Battle 打开）。
 var autopilot := false
@@ -26,6 +30,10 @@ var autopilot := false
 ## 由 Battle.start_run 在【非自检/非探针进程】注入（MetaSave.meta_bonus()），
 ## 探针可直接改写本字段做注入测试 —— 与 _bonus 分离，局外加成绝不混进局内升级。
 var meta_bonus_dict: Dictionary = {}
+
+## 局外「复活契约」本局是否已用掉（每局一次）。reset() 清零 —— 它是**每局资源**，
+## 与「初心」（`_beginner_save_used`）和商店「复活币」（`resurrect_charges`）三套独立计数。
+var meta_revive_used := false
 
 
 ## 虚拟摇杆方向（批次四 4b）。由 Battle 每帧注入（TouchControls.move_dir()），
@@ -107,12 +115,16 @@ var pickup_range: float = GameStats.PICKUP_RANGE_BASE
 var level: int = GameStats.START_LEVEL
 var xp: int = GameStats.START_XP
 var xp_to_next: int = GameStats.START_XP_TO_NEXT
-## 初始金币由角色决定（金融豪 80），见 reset()
+## 初始金币由角色决定（金融嘉豪 80），见 reset()
 var gold: int = 20
 ## 每次击杀额外金币（存钱罐）
 var gold_per_kill := 0
 ## 商店价格折扣（投资手册；1.0 = 原价）
 var shop_discount := 1.0
+## 精英掉落的「商店券」张数（2026-09-22 精英词缀系统）：进下一家商店时由 Battle 消费
+## 1 张 → 该店全店 8 折。**运行态资源，不参与 recalc_stats** —— 它是「捡到的道具」
+## 而不是「派生属性」，放进幂等重算会被下一次 recalc 抹掉。
+var shop_coupon := 0
 
 # ---- 2026-09-20 扩充新增：护盾 / 反甲 / 弹速 / 拾取倍率 / 额外选项 / 复活币 ----
 ## 当前护盾吸收值（受击时先扣盾再扣血）。上限 shield_cap，脱战回充。
@@ -169,7 +181,7 @@ func _ready() -> void:
 ## 接上美术精灵：待机 / 跑动两组序列帧。
 ## 资源缺失时不报错，只是回落到图元占位画法 —— 保证「没美术也能跑」。
 var char_id: String = GameStats.DEFAULT_CHAR
-## 升级所需经验的倍率（角色天赋，学习豪 0.77 = 升级更快）。
+## 升级所需经验的倍率（角色天赋，学习嘉豪 0.77 = 升级更快）。
 var _xp_mul := 1.0
 
 # ---- 角色特性（见 GameStats.CHARACTERS[].trait_id 与 docs/design/人物设计_嘉豪四人组）----
@@ -262,6 +274,8 @@ func reset(pos: Vector2) -> void:
 	_kanga_stop_t = 0.0
 	# 全场磁吸计时清零（磁铁掉落，参考 C3 掉落三件套）
 	magnet_all_t = 0.0
+	# 商店券每局清零（精英词缀掉落，不能继承到下一局）
+	shop_coupon = 0
 	# 2026-09-20 扩充新增字段每局清零（thorns/cdr/proj_speed_mul 由 _bonus 派生，已随上面清零）
 	shield = 0.0
 	shield_cap = 0.0
@@ -270,6 +284,8 @@ func reset(pos: Vector2) -> void:
 	pickup_mul_run = 1.0
 	extra_card_pending = 0
 	resurrect_charges = 0
+	# 复活契约每局重置（2026-09-22 meta 扩充）：局外买断 ⇒ 每局都自带一次，但不叠。
+	meta_revive_used = false
 	# 武器进化状态清零（B2 迭代：weapon_mastery 层数与进化标记每局重置）
 	weapon_level = 0
 	weapon_evolved = false
@@ -277,6 +293,13 @@ func reset(pos: Vector2) -> void:
 	xp = GameStats.START_XP
 	xp_to_next = roundi(GameStats.START_XP_TO_NEXT * _xp_mul)
 	gold = int(GameStats.character(char_id)["start_gold"])
+	# 启动资金（2026-09-22 meta 扩充）：局外「启动资金」级数 ×50 直接加到开局金币上。
+	# 走**整数平加**而不是 add_gold() —— 后者还有一道 meta 金币乘区，绕它一圈等于自我叠乘。
+	# 收口点刻意放在 reset()：全局唯一决定开局金币的地方，且探针只需「设 meta_bonus_dict
+	# → reset()」即可验证，不必真实存档。
+	var m_start: float = float(meta_bonus_dict.get("start_gold", 0.0))
+	if m_start > 0.0:
+		gold += int(m_start)
 	invincible_timer = 0.0
 	attack_timer = 0.0
 	recalc_stats()
@@ -291,17 +314,26 @@ func reset(pos: Vector2) -> void:
 func recalc_stats() -> void:
 	var all: float = _bonus["all"]   # 「全属性+X%」乘区（土豆芯片）
 	# 局外永久强化（MetaSave 消费端）。get 全带默认值 0 —— 字段缺失/空字典都安全。
+	# 九键里本函数消费 5 个：atk_mul / hp_flat / pickup_mul / crit / aspd_mul；
+	# 另 4 个（gold_mul / xp_mul / start_gold / revive）分别在 add_gold / gain_xp /
+	# Battle.start_run / take_hit 消费 —— 位置由「语义归属」决定，不集中在这里。
 	var m_atk: float = float(meta_bonus_dict.get("atk_mul", 0.0))
 	var m_hp: float = float(meta_bonus_dict.get("hp_flat", 0.0))
 	var m_pick: float = float(meta_bonus_dict.get("pickup_mul", 0.0))
+	var m_crit: float = float(meta_bonus_dict.get("crit", 0.0))
+	var m_aspd: float = float(meta_bonus_dict.get("aspd_mul", 0.0))
 	atk = roundi(float(_base["atk"]) * (1.0 + all) + _bonus["atk"])
 	if m_atk > 0.0:
 		atk = roundi(float(atk) * (1.0 + m_atk))
 	defense = roundi(float(_base["def"]) * (1.0 + all) + _bonus["def"])
 	spd = roundi(float(_base["spd"]) * GameStats.SPATIAL_SCALE * (1.0 + _bonus["spd"]) * (1.0 + all))
 	aspd = clampf(float(_base["aspd"]) * (1.0 + _bonus["aspd"]) * (1.0 + all), 0.05, GameStats.MAX_ASPD)
+	if m_aspd > 0.0:
+		# 急速是【乘区】（与「全属性」同性质），不是加法 —— 与 aspd 上限同一道护栏。
+		aspd = clampf(aspd * (1.0 + m_aspd), 0.05, GameStats.MAX_ASPD)
 	proj = maxi(1, int(_base["proj"]) + int(_bonus["proj"]))   # 不设上限（2026-09-20 用户需求）
-	crit = minf(GameStats.MAX_CRIT, float(_base["crit"]) + _bonus["crit"])
+	# 致命强化：暴击【加法】进已有累加区，与升级卡/角色基础暴击同一道 MAX_CRIT 封顶。
+	crit = minf(GameStats.MAX_CRIT, float(_base["crit"]) + _bonus["crit"] + m_crit)
 	# 暴击伤害封顶（审查 P2）：critd 卡是升级池里唯一没有上限的成长项，
 	# 无限叠会通胀（+0.4/张 × 攻击力基数）。上限取 6.0 = 600%，正常局摸不到顶。
 	critd = minf(GameStats.MAX_CRITD, float(_base["critd"]) + _bonus["critd"])
@@ -435,13 +467,25 @@ func take_hit(raw_dmg: int) -> Dictionary:
 			invincible_timer = GameStats.TRAIT_SAVE_IFRAME
 			stats_changed.emit()
 			return {"result": "hit", "dmg": d, "trait": "resurrect"}
+		# 【复活契约】（2026-09-22 meta 扩充）：免死的第三个来源 —— 局外永久解锁，每局一次。
+		# 刻意排在「初心」「复活币」【之后】：前两者是本局内可耗尽的资源，契约每局重置；
+		# 放最后 = 先烧掉会烧完的，把契约留给真正的最坏情况。
+		# 三套计数完全独立（`_beginner_save_used` / `resurrect_charges` / `meta_revive_used`），
+		# 效果 = 回 50% 血 + 长无敌，**清场交给 Battle**（Player 不持有敌人数组）。
+		if not meta_revive_used and int(meta_bonus_dict.get("revive", 0)) > 0:
+			meta_revive_used = true
+			hp = float(maxi(1, roundi(float(max_hp) * GameStats.META_REVIVE_HP_RATIO)))
+			invincible_timer = GameStats.META_REVIVE_IFRAME
+			stats_changed.emit()
+			meta_revived.emit()
+			return {"result": "hit", "dmg": d, "trait": "meta_revive"}
 		hp = 0.0
 		died.emit()
 		return {"result": "dead", "dmg": d}
 	return {"result": "hit", "dmg": d}
 
 
-## 出膛伤害乘区（仅忧郁豪「背水一战」非 1.0；其余角色恒返 1.0）。
+## 出膛伤害乘区（仅忧郁嘉豪「背水一战」非 1.0；其余角色恒返 1.0）。
 ## 乘在 `atk × dmg_mul × PROJ_DMG_BOOST` 之后、暴击判定之前（见设计文档 §0.3）。
 ## 出膛时实时结算 —— 弹道飞行途中掉血不追溯已发出的那一发。
 func damage_bonus() -> float:
@@ -456,7 +500,7 @@ func damage_bonus() -> float:
 	return 1.0
 
 
-## 见钱眼开：当前移速乘区（仅金融豪可能 ≠ 1.0）。
+## 见钱眼开：当前移速乘区（仅金融嘉豪可能 ≠ 1.0）。
 ## 刻意做成**运行时乘区**而不是写进 _bonus —— _bonus 是幂等 recalc 的输入，
 ## 塞进临时 buff 会让 recalc 反复叠加（幂等纪律）。
 func money_speed_mul() -> float:
@@ -579,10 +623,15 @@ func add_shield(value: float, add_charge: bool = true) -> void:
 func gain_xp(amount: int) -> int:
 	if amount <= 0:
 		return 0
-	# 学习能力（2026-09-20 扩充）：经验获取乘区（+15/20/25%），在入账处乘
+	# 学习能力（2026-09-20 扩充）：经验获取乘区（+15/20/25%），在入账处乘。
+	# 智慧强化（2026-09-22 meta）：同为「经验获取」乘区，与学习能力**乘算**后再统一取整
+	#（分两次 roundi 会各丢一次小数，长局里能差出几十点经验）。两者皆 0 ⇒ 乘区恒 1.0 = 逐位不变。
+	var m_xp: float = float(meta_bonus_dict.get("xp_mul", 0.0))
 	var gain := amount
-	if _bonus["expGain"] > 0.0:
-		gain = maxi(1, roundi(float(amount) * (1.0 + _bonus["expGain"])))
+	# ⚠️ 显式标注 float：`_bonus[...]` 是 Variant ⇒ 整条表达式无法被 `:=` 推断（铁律第 3 条）。
+	var gain_mul: float = (1.0 + float(_bonus["expGain"])) * (1.0 + m_xp)
+	if gain_mul > 1.0:
+		gain = maxi(1, roundi(float(amount) * gain_mul))
 	xp += gain
 	var gained := 0
 	while xp >= xp_to_next:
@@ -603,6 +652,13 @@ func gain_xp(amount: int) -> int:
 func add_gold(amount: int) -> void:
 	if amount <= 0:
 		return
+	# 财富强化（2026-09-22 meta）：「局内金币获取 +10%/级」—— 统一在**入账点**乘，
+	# 于是击杀掉落 / 金币镖 / 钱袋 / 波末回收四条来源口径一致（都是「局内到手的金」）。
+	# 与金融嘉豪的「金币镖 gold_per_kill」是**加法叠加**（那边加的是掉落面额，这里乘总量）。
+	# 0 级 ⇒ 乘区恒 1.0 = 逐位不变。
+	var m_gold: float = float(meta_bonus_dict.get("gold_mul", 0.0))
+	if m_gold > 0.0:
+		amount = maxi(1, roundi(float(amount) * (1.0 + m_gold)))
 	gold += amount
 	# 【见钱眼开】每次进账 +1 层（封顶 3 层），并刷新持续时长。
 	# 捡第 4 枚只刷新时长、不再加层。波末自动回收是逐枚 _collect → 逐枚触发，
@@ -657,6 +713,16 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	_clamp_to_arena()
 	_update_visual_state(dir)
+	# 【贴墙卡死检测 2026-09-21】自动驾驶下累计「位移近零」时长：被墙+楼夹缝卡死、
+	# 或 dir 恰好纯法向撞楼（move_and_slide 无切向分量可滑）时像素级静止 ——
+	# 累计满 3s 由 _compute_autopilot_dir 末尾的兜底强制脱困（仅自动驾驶需要；
+	# 真人松手重开即可，且射程内有怪时的风筝抖动不能误判为卡死）。
+	if autopilot and is_alive():
+		if global_position.distance_to(_stuck_pos) < 4.0:
+			_stuck_t += delta
+		else:
+			_stuck_t = 0.0
+			_stuck_pos = global_position
 
 	if is_alive():
 		_handle_attack(delta)
@@ -702,10 +768,46 @@ func set_touch_dir(v: Vector2) -> void:
 ## 为什么要「顺路捡东西」：拾取范围改成小值之后，只顾逃跑的话掉落物几乎收不到，
 ## 玩家等级跟不上敌人成长 —— 自检就会测出一条失真的难度曲线（假难）。
 ## 真人玩家是边躲边捡的，自动驾驶必须做同样的事，测出来的数据才有意义。
+## 贴墙卡死检测状态（2026-09-21）：自动驾驶下累计「位移近零」的时长与上次采样点，
+## 更新在 _physics_process 的移动段，消费在 _compute_autopilot_dir 末尾的脱困兜底。
+var _stuck_pos := Vector2.ZERO
+var _stuck_t := 0.0
 const LOOT_SEEK_DIST := 250.0   # 最近敌人距此以外，才敢绕路捡东西
 const LOOT_PULL_DIST := 170.0   # 掉落物距此以内才值得绕路
 const LOOT_WEIGHT := 0.45       # 捡东西只做「偏航」，主方向仍然是躲避
 const AVOID_OBSTACLE_DIST := 150.0   # 距建筑物小于此距离就开始绕开
+## 残敌追击的触发判据（2026-09-21）。
+##
+## 为什么必须有追击 ——「清场制」暴露的死锁：
+## 远程怪（Stats.RANGED_KEEP_MIN/MAX = 260~380）会站定在玩家射程（ATTACK_RANGE_BASE=230）
+## 【之外】原地放弹，而本函数旧版只算 flee = 远离最近敌人 —— 于是玩家越逃越远，
+## 距离只增不减，两边永久互不伤害。远程怪恰好从第 8 波入池，实测清场阶段
+## 从波 8 起冻结在固定只数长达 300+ 秒不动，20 波必然跑不完自检上限。
+##
+## 判据用【射程内有没有目标】，而不是【场上还剩几只】（2026-09-21 二调）：
+## 首版按「场上 ≤8 只」触发，结果波 9 在【13 只】处照样冻结 —— 数量阈值永远追不上
+## 真实的残局规模。而「射程内无目标」是空间性判据，与剩多少只无关，从定义上
+## 覆盖所有「打不到人」的僵局。
+##
+## 为什么不破坏难度曲线：只要射程内有任何一只怪，玩家就照旧逃跑/风筝（行为逐位不变）
+## —— 而这正是怪群战（波末同屏 40~78 只）的常态，此时总有目标在射程内。
+## 只有「一只都打不到」时才转为逼近，而那只可能是清场期的残敌。
+##
+## 为什么【不加】迟滞带（2026-09-21 三调，推翻上一版）：
+## 曾给追击启动加 40px 迟滞（要求最近敌人 > 射程+40 才追），结果制造出 230~270
+## 的「死区」—— 怪停在这段距离时既不进射程、又不触发追击，玩家在 270 处悬停
+## 对峙到天荒地老。而射程边界上的「进 1px 逃 / 出 1px 追」逐帧抖动其实是
+## 【正确行为】：那就是风筝（边打边撤），每轮贴近都会真的开火。故阈值就是
+## attack_range 本身，不加任何余量。
+
+func _enemy_in_attack_range() -> bool:
+	for e in battle.enemies:
+		var en: Node2D = e
+		if en == null or not is_instance_valid(en) or en.is_dead:
+			continue
+		if global_position.distance_to(en.global_position) <= attack_range:
+			return true
+	return false
 
 func _compute_autopilot_dir() -> Vector2:
 	var enemy: Node2D = battle.get_nearest_enemy(global_position)
@@ -717,15 +819,52 @@ func _compute_autopilot_dir() -> Vector2:
 
 	var dir := flee
 
-	# 危险不大时，朝最近的掉落物偏一点
-	if enemy_dist > LOOT_SEEK_DIST:
+	# 残局追击（判据见 _enemy_in_attack_range 注释）：射程内一只都打不到、而最近敌人
+	# 在射程外 → 反转为「逼近」，把目标压进射程内。用 attack_range 而非硬编码 230：
+	# 射程吃升级加成（range→attackRange），追击阈值必须跟着射程走。
+	#
+	# ⚠️ 必须显式标注 bool：右侧混了 Variant 句柄判空与算术比较，
+	# 类型推断拿不到确定类型会直接 Parse Error（本工程已踩 4+ 次的坑）。
+	var pursuing: bool = enemy != null \
+		and enemy_dist > attack_range \
+		and not _enemy_in_attack_range()
+	if pursuing:
+		# 追击撞楼问题（2026-09-21 三调）：通用避障「推离建筑」权重 1.8 会完全盖过
+		# 追击方向 —— 目标躲在楼正后方时，玩家在避障圈边缘进退循环（实测波 8 清到
+		# 剩 2 只后冻结 120s+）。修法：追击期间不用通用避障，改把「推离」旋转 90°
+		# 变成「切向绕行」分量 —— 贴着楼滑过去，而不是撞墙回头。
+		var to_enemy: Vector2 = (enemy.global_position - global_position).normalized()
+		for o in battle.obstacles:
+			# 【大楼检测盲区修复 2026-09-21】旧版用「到楼中心距离 < 150」判定贴近，
+			# 大楼（如 400×300）中心距可达 200+，玩家贴着楼边也检测不到 → 追击方向
+			# 纯法向撞楼、move_and_slide 无切向可滑 → 像素级卡死（实测某局波 9 卡
+			# 4595s，玩家 (724,18) 纹丝不动）。改用「到楼矩形最近点」的距离，
+			# 任何尺寸的楼贴边即触发（Obstacle.world_rect 现成）。
+			var closest: Vector2 = o.world_rect().closest_point(global_position)
+			var d: float = global_position.distance_to(closest)
+			if d < AVOID_OBSTACLE_DIST and d > 0.001:
+				var away: Vector2 = (global_position - closest).normalized()
+				var tangent := Vector2(-away.y, away.x)
+				if tangent.dot(to_enemy) < 0.0:
+					tangent = -tangent
+				to_enemy = (to_enemy + tangent * 1.2).normalized()
+				break   # 只绕最近的一栋；残局不需要多楼综合路径
+		dir = to_enemy
+
+	# 危险不大时，朝最近的掉落物偏一点。
+	# ⚠️ 追击期间【跳过捡掉落物】：追击目标常在远处，若还按 LOOT_WEIGHT 偏航，
+	# 玩家会被路边的掉落物吸引着走 Z 字，可能永远走不到目标面前（再次死锁）。
+	# 追击优先级高于捡钱 —— 先打完再捡。
+	if not pursuing and enemy_dist > LOOT_SEEK_DIST:
 		var loot: Node2D = battle.get_nearest_pickup(global_position)
 		if loot != null and global_position.distance_to(loot.global_position) < LOOT_PULL_DIST:
 			var to_loot := (loot.global_position - global_position).normalized()
 			dir = (dir * (1.0 - LOOT_WEIGHT) + to_loot * LOOT_WEIGHT).normalized()
 
+	# 太偏了回拉中心。⚠️ 追击期间不做：目标可能就在角落里，回拉（权重 1.4）会
+	# 直接盖过追击方向，把玩家拽离目标 —— 又回到「永远走不到面前」的死锁。
 	var to_center := GameStats.ARENA_CENTER - global_position
-	if to_center.length() > 360.0:
+	if not pursuing and to_center.length() > 360.0:
 		dir = (dir + to_center.normalized() * 1.4).normalized()
 
 	# 避障：远离附近的建筑物。
@@ -734,11 +873,23 @@ func _compute_autopilot_dir() -> Vector2:
 	# 注意：battle 声明为 Node，取 .obstacles 得到的是 Variant ——
 	# 必须先落到显式类型的局部变量，否则 "从 Variant 推断类型" 会直接报 Parse Error。
 	for o in battle.obstacles:
-		var opos: Vector2 = o.global_position
-		var d: float = global_position.distance_to(opos)
+		if pursuing:
+			break   # 追击期间由切向绕行接管（见 pursuing 分支），通用避障会让位
+		# 同追击分支：用「到楼矩形最近点」距离，修大楼检测盲区（中心距离对大楼失真）
+		var closest: Vector2 = o.world_rect().closest_point(global_position)
+		var d: float = global_position.distance_to(closest)
 		if d < AVOID_OBSTACLE_DIST and d > 0.001:
-			var away: Vector2 = (global_position - opos).normalized()
+			var away: Vector2 = (global_position - closest).normalized()
 			dir = (dir + away * (1.0 - d / AVOID_OBSTACLE_DIST) * 1.8).normalized()
+
+	# 【贴墙卡死脱困兜底 2026-09-21】实测死锁（某局波 9 卡 4595s）：玩家被墙+楼夹缝
+	# 卡死，dir 恰好纯法向撞楼 → move_and_slide 无切向分量可滑 → 像素级静止；
+	# 残敌全在射程外、追击方向被楼面完全吞掉。判定「连续 3s 位移 < 4px 且射程内
+	# 无目标」→ 强制改朝场心脱困：场心方向相对任何墙面/楼面都有切向分量，
+	# move_and_slide 能滑出夹缝。射程内有怪时不触发 —— 风筝的边界抖动是正常行为。
+	if _stuck_t > 3.0 and not _enemy_in_attack_range():
+		dir = (GameStats.ARENA_CENTER - global_position).normalized()
+		_stuck_t = 0.0
 
 	if dir.length_squared() < 0.0001:
 		dir = Vector2.RIGHT

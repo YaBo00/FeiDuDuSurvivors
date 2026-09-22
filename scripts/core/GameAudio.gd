@@ -10,6 +10,11 @@ extends Node
 
 const DIR := "res://assets/audio/"
 const POOL := 10
+## 音频总线名（2026-09-22 设置菜单）：Master 下挂两条子总线，设置里的两个滑块分别控它们。
+## 运行时按需创建（AudioServer.add_bus）—— 无需 .tres 总线布局与编辑器接线，
+## 「没编辑器也能跑」这条性质同样适用于音频路由。
+const BUS_MUSIC := "Music"
+const BUS_SFX := "SFX"
 
 var _players: Array[AudioStreamPlayer] = []
 var _streams := {}
@@ -17,8 +22,11 @@ var _streams := {}
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_ensure_bus(BUS_MUSIC)
+	_ensure_bus(BUS_SFX)
 	for i in POOL:
 		var p := AudioStreamPlayer.new()
+		p.bus = BUS_SFX        # 所有音效走 SFX 总线（音量由设置控制）
 		add_child(p)
 		_players.append(p)
 
@@ -49,6 +57,7 @@ func play(sound: String, volume_db := 0.0, pitch_jitter := 0.05) -> void:
 ## —— 打包体积直接省掉 6.4MB。两种格式都保留支持：有 .ogg 用 .ogg，否则回落 .wav，
 ## 保证「素材缺失/只放了一种格式也能跑」这条性质不破。
 static func play_bgm(tree: SceneTree, volume_db := -10.0) -> void:
+	_ensure_bus(BUS_MUSIC)
 	var existing := tree.root.get_node_or_null("BgmPlayer") as AudioStreamPlayer
 	if existing != null:
 		if not existing.playing:
@@ -60,10 +69,42 @@ static func play_bgm(tree: SceneTree, volume_db := -10.0) -> void:
 	var p := AudioStreamPlayer.new()
 	p.name = "BgmPlayer"
 	p.stream = stream
+	p.bus = BUS_MUSIC          # BGM 走 Music 总线（音量由设置控制）
 	p.volume_db = volume_db
 	p.process_mode = Node.PROCESS_MODE_ALWAYS
 	tree.root.add_child(p)
 	p.play()
+
+
+# ---------------------------------------------------------------- 音频总线 + 音量设置（2026-09-22）
+## 取总线下标；不存在则新建一条挂在 Master 下的子总线并返回其下标。
+## 幂等：重复调用不会建重复总线。
+static func _ensure_bus(bus_name: String) -> int:
+	var idx := AudioServer.get_bus_index(bus_name)
+	if idx != -1:
+		return idx
+	AudioServer.add_bus()
+	idx = AudioServer.get_bus_count() - 1
+	AudioServer.set_bus_name(idx, bus_name)
+	AudioServer.set_bus_send(idx, "Master")
+	return idx
+
+
+## 把 MetaSave 里存的两个音量值应用到总线。启动时 + 滑块每次变化时调用。
+## 值域 [0,1] 线性 → db；v ≤ 0 时改用 mute（避免 linear_to_db(0) = -inf 的脏值）。
+static func apply_volume_settings() -> void:
+	_apply_bus_volume(BUS_MUSIC, float(MetaSave.get_setting("music_vol")))
+	_apply_bus_volume(BUS_SFX, float(MetaSave.get_setting("sfx_vol")))
+
+
+static func _apply_bus_volume(bus_name: String, v: float) -> void:
+	var idx := _ensure_bus(bus_name)
+	var lin := clampf(v, 0.0, 1.0)
+	if lin <= 0.0:
+		AudioServer.set_bus_mute(idx, true)
+	else:
+		AudioServer.set_bus_mute(idx, false)
+		AudioServer.set_bus_volume_db(idx, linear_to_db(lin))
 
 
 ## 载入 BGM 并打开循环。优先 .ogg，回落 .wav。两者都没有则返回 null（静默）。

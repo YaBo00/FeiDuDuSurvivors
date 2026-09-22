@@ -22,7 +22,7 @@ extends SceneTree
 ## 退出码 0=PASS 1=FAIL（门禁用 grep -q "RESULT=PASS" 判定）
 
 const DT := 1.0 / 60.0        # 确定性单步步长（与真实物理帧一致）
-const STEPS := 140            # 每组单步帧数：PROJ_SPEED=450px/s × 140 帧 ≈ 1050px，足够完整穿越
+const STEPS := 140            # 每组单步帧数：弹速 225px/s，但实际由 PROJ_LIFE 封顶（约 96 帧 ≈ 360px）；140 帧余量足够完整穿越整排
 const DMG_A := 15             # A 组单发伤害
 const DMG_B := 10             # B 组单发伤害
 const DMG_C := 12             # C 组单发伤害

@@ -73,6 +73,15 @@ func reset() -> void:
 	_proj_hits.clear()
 
 
+## 飘字统一出口（2026-09-22 设置菜单）：所有战斗飘字都经这里发出。
+## 「伤害数字」开关关掉时直接吞掉，不再 emit —— 池子不产生任何飘字。
+## 设置值走 MetaSave 的缓存（非文件 IO），在每次命中/受击的热路径上调用也无压力。
+func _float(pos: Vector2, text: String, color: Color, big: bool) -> void:
+	if not bool(MetaSave.get_setting("show_floats")):
+		return
+	float_requested.emit(pos, text, color, big)
+
+
 ## 清扫 _proj_hits 里弹道已释放的条目（防跨帧悬挂键累积）。
 ## 对象释放路径有三处：本函数内 advance 到期 / 消耗回收，以及 Battle._clear_all /
 ## _end_run 的批量 queue_free —— 这里统一兜底，无需每条路径都记得擦表。
@@ -83,16 +92,11 @@ func _prune_proj_hits() -> void:
 			_proj_hits.erase(k)
 
 
-## 战斗主 tick 中的战斗部分：接触伤害 → 弹道 → 清理 → 网格 → 分离力。
-## 呼叫方（Battle._tick_fighting）负责保持与波次投放的相对顺序不变。
-func tick(delta: float) -> void:
-	contact_damage()
-	if _b.state != _b.State.FIGHTING:
-		return
-	process_projectiles(delta)
-	cleanup_enemies()
-	_b.live_max = maxi(int(_b.live_max), _b.enemies.size())
-	space_and_separate()
+## 【已删除 tick()（质检 P2-1，2026-09-22）】本函数曾是「战斗主 tick 的战斗部分」的
+## 一站式封装，但全工程没有任何调用方 —— Battle._tick_fighting 手写了同一序列。
+## 且其内部写 `_b.live_max`，而 Battle 上并无该字段（真身在 WaveDirector，
+## Battle 用的是 `wave.live_max`）—— 一旦被调用就是运行时报错的「接口漂移」死代码。
+## 删除后主战斗序列只剩 Battle._tick_fighting 一条真路径（顺序敏感，勿在那边乱动）。
 
 
 ## 重建空间网格 + 按预算节奏执行分离力（与弹道碰撞共用同一次网格重建）。
@@ -140,13 +144,13 @@ func contact_damage() -> void:
 			var back := maxi(1, roundi(float(e.dmg) * _b.player.thorns))
 			e.take_damage(back)
 			e.last_hit_crit = false
-			float_requested.emit(e.global_position + Vector2(0, -e.radius * 0.6),
+			_float(e.global_position + Vector2(0, -e.radius * 0.6),
 				str(back), Color(0.55, 1.0, 0.58), false)
 	# A1：闪避/受击飘字都做节流。站在怪堆里时 60 帧/秒会疯狂触发，
 	# 28 个飘字池瞬间被打满、互相覆盖，什么都看不清。
 	if res == "dodge" and _b._game_time - _last_dodge_float >= FLOAT_THROTTLE:
 		_last_dodge_float = _b._game_time
-		float_requested.emit(_b.player.global_position + Vector2(0, -34.0), "闪避",
+		_float(_b.player.global_position + Vector2(0, -34.0), "闪避",
 			Color(0.68, 0.90, 1.0), false)
 		sfx_requested.emit("dodge", -6.0, 1.0)
 	if res == "hit" or res == "dead":
@@ -154,7 +158,7 @@ func contact_damage() -> void:
 		# A6：玩家受击也飘红色数字（和敌人飘字对称）
 		if _b._game_time - _last_hurt_float >= FLOAT_THROTTLE:
 			_last_hurt_float = _b._game_time
-			float_requested.emit(_b.player.global_position + Vector2(0, -44.0),
+			_float(_b.player.global_position + Vector2(0, -44.0),
 				"-%d" % int(r["dmg"]), Color(1.0, 0.35, 0.30), false)
 			sfx_requested.emit("hurt", -4.0, 1.0)
 	if res == "dead":
@@ -178,13 +182,13 @@ func process_projectiles(delta: float) -> void:
 				# 反馈与接触伤害完全一致（闪避蓝字 / 受击红字都走节流）
 				if res == "dodge" and _b._game_time - _last_dodge_float >= FLOAT_THROTTLE:
 					_last_dodge_float = _b._game_time
-					float_requested.emit(_b.player.global_position + Vector2(0, -34.0), "闪避",
+					_float(_b.player.global_position + Vector2(0, -34.0), "闪避",
 						Color(0.68, 0.90, 1.0), false)
 				if res == "hit" or res == "dead":
 					shake_requested.emit()
 					if _b._game_time - _last_hurt_float >= FLOAT_THROTTLE:
 						_last_hurt_float = _b._game_time
-						float_requested.emit(_b.player.global_position + Vector2(0, -44.0),
+						_float(_b.player.global_position + Vector2(0, -44.0),
 							"-%d" % int(r["dmg"]), Color(1.0, 0.35, 0.30), false)
 						sfx_requested.emit("hurt", -4.0, 1.0)
 				proj.queue_free()
@@ -210,18 +214,21 @@ func process_projectiles(delta: float) -> void:
 				continue
 			if proj.position.distance_to(e.global_position) < e.radius + proj.radius:
 				var res: Dictionary = GameStats.player_damage(proj.damage, proj.crit, proj.critd, e.defense)
-				e.take_damage(int(res["dmg"]))
+				# 中毒易伤（毒云 Lv5）在这条路径一并生效 —— 无中毒时原样返回，
+				# 既有伤害数值逐位不变（回归红线）。
+				var dmg: int = _vuln_adjust(int(res["dmg"]), e as Enemy)
+				e.take_damage(dmg)
 				e.last_hit_crit = bool(res["is_crit"])
 				sfx_requested.emit("hit", -8.0, 1.0)
 				# 伤害飘字：暴击橙色放大，普通白色
-				float_requested.emit(e.global_position + Vector2(0, -e.radius * 0.6),
-					str(res["dmg"]),
+				_float(e.global_position + Vector2(0, -e.radius * 0.6),
+					str(dmg),
 					Color(1.0, 0.62, 0.18) if res["is_crit"] else Color(1, 1, 1),
 					bool(res["is_crit"]))
 				if proj.lifesteal > 0.0:
-					_b.player.heal(float(res["dmg"]) * proj.lifesteal)
+					_b.player.heal(float(dmg) * proj.lifesteal)
 				# 【金币镖】命中时按概率在命中位置掉一枚金币。
-				# 面额 = WEAPON_GOLD_ON_HIT_VALUE × harvest 取整，最少 1（金融豪 harvest 1.5 → 2 元）。
+				# 面额 = WEAPON_GOLD_ON_HIT_VALUE × harvest 取整，最少 1（金融嘉豪 harvest 1.5 → 2 元）。
 				if proj.gold_on_hit > 0.0 and randf() < proj.gold_on_hit:
 					spawn_pickup(Pickup.KIND_GOLD,
 						maxi(1, roundi(float(GameStats.WEAPON_GOLD_ON_HIT_VALUE)
@@ -235,7 +242,8 @@ func process_projectiles(delta: float) -> void:
 				# 慢速大弹在重叠区停留多帧也不会对同一目标重复溅射（与穿透去重同表）。
 				# GRID_CELL=96 ≥ 最大溅射半径 90，nearby_enemies 的 3x3 查询保证全覆盖。
 				if proj.aoe_radius > 0.0 and proj.aoe_pct > 0.0:
-					var splash := maxi(1, roundi(float(res["dmg"]) * proj.aoe_pct))
+					# 溅射基数用【实扣伤害 dmg】（已含中毒易伤），与直接命中同口径
+					var splash := maxi(1, roundi(float(dmg) * proj.aoe_pct))
 					for oe in nearby_enemies(e.global_position):
 						if oe.is_dead or oe == e:
 							continue
@@ -246,10 +254,10 @@ func process_projectiles(delta: float) -> void:
 						hits[oe.get_instance_id()] = true
 						oe.take_damage(splash)
 						oe.last_hit_crit = false
-						float_requested.emit(oe.global_position + Vector2(0, -oe.radius * 0.6),
+						_float(oe.global_position + Vector2(0, -oe.radius * 0.6),
 							str(splash), Color(1.0, 0.84, 0.35), false)
 				# 穿透判定读【逐弹道】pierce_cap，不是全局 PROJ_PIERCE ——
-				# 忧郁豪暗影弹 pierce=99（贯穿全屏）就是靠这条生效。
+				# 忧郁嘉豪暗影弹 pierce=99（贯穿全屏）就是靠这条生效。
 				if proj.pierced >= proj.pierce_cap:
 					consumed = true
 					break
@@ -259,6 +267,39 @@ func process_projectiles(delta: float) -> void:
 		else:
 			remaining.append(proj)
 	_b.projectiles = remaining
+
+
+## 非弹道来源的伤害统一入口（副武器：环绕飞刃 / 闪电链 / 冰霜新星 / 毒云，2026-09-22）。
+##
+## 与弹道命中走【同一套】结算：暴击判定 → 护甲减免 → 中毒易伤 → 飘字 → 命中音效。
+## 这样副武器自动吃到玩家的 atk / crit / critd 与敌人的护甲，不会自成一套数值。
+## 刻意【不做】吸血与金币镖：那是主角武器/道具的词条（文档 §6「不要动主角武器」）。
+##
+## 返回实扣伤害（0 = 目标无效 / 已死）；击杀侧效仍由 cleanup_enemies 统一处理。
+func deal_extra_damage(e: Enemy, raw: int, tint: Color, big: bool = false) -> int:
+	if e == null or not is_instance_valid(e) or e.is_dead or raw <= 0:
+		return 0
+	var p: Player = _b.player
+	var res: Dictionary = GameStats.player_damage(raw, p.crit, p.critd, e.defense)
+	var dmg := _vuln_adjust(int(res["dmg"]), e)
+	e.take_damage(dmg)
+	e.last_hit_crit = bool(res["is_crit"])
+	sfx_requested.emit("hit", -10.0, 1.0)
+	# 飘字用武器自己的底色 —— 玩家一眼能分辨「这刀是副武器打的」还是主角武器打的
+	_float(e.global_position + Vector2(0, -e.radius * 0.6), str(dmg),
+		Color(1.0, 0.62, 0.18) if res["is_crit"] else tint,
+		bool(res["is_crit"]) or big)
+	return dmg
+
+
+## 中毒易伤（毒云 Lv5）：受击伤害 × Enemy.incoming_vuln_mul()。
+## 无中毒恒 ×1.0，且这里【提前返回】—— 既有伤害路径一个浮点乘法都不增加，
+## 数值逐位不变（回归红线）。
+func _vuln_adjust(dmg: int, e: Enemy) -> int:
+	var m := e.incoming_vuln_mul()
+	if m <= 1.0:
+		return dmg
+	return maxi(1, roundi(float(dmg) * m))
 
 
 ## 远程怪 / Boss 开火回调（Enemy.fired_enemy_proj）。
@@ -315,14 +356,25 @@ func on_player_fired(aim_pos: Vector2, count: int) -> void:
 		visual = AssetDB.weapon_bullet(wid)
 	# 多弹道间隔角（2026-09-20 用户需求）：默认每发 PROJ_SPREAD；弹道数多到总扇面触顶
 	# MAX_PROJ_SPREAD 后，扇面不再变宽，改为压缩每条之间的间隔角。
-	# ≤5 条时 MAX_PROJ_SPREAD/(n-1) ≥ PROJ_SPREAD ⇒ step 仍为 PROJ_SPREAD，行为与旧版逐位一致。
+	# 【中央弹道恒定 2026-09-21 二改（用户拍板）】：中心弹道永远 off=0 不动，新增弹道
+	# 成对向左右展开（+s,-s,+2s,-2s,…）—— 任何弹道数量下中心方向始终有一条弹道覆盖，
+	# 消除中心盲区。旧版对称散射在偶数 shots 时无中央弹道（最近两条偏 ±step/2），
+	# 索敌目标躺在瞄准线上时永远打不中（实测 shots=6 @d314 横偏 ±37.6px > 命中门
+	# 19px，残局零命中死锁）。偶数 shots 时最后一条落单，单侧最大 k = shots/2 →
+	# 总扇面 = shots×step，封顶分母用 shots（保持总宽 ≤ MAX_PROJ_SPREAD）；
+	# 奇数 shots 单侧最大 k = (shots-1)/2，总宽 = (shots-1)×step 与旧版一致 ——
+	# 奇数 shots 的弹道角度集合与旧版逐位相同（仅生成顺序不同，同帧无差）。
 	var step := GameStats.PROJ_SPREAD
 	if shots > 1:
-		step = minf(step, GameStats.MAX_PROJ_SPREAD / float(shots - 1))
+		var slots := float(shots) if shots % 2 == 0 else float(shots - 1)
+		step = minf(step, GameStats.MAX_PROJ_SPREAD / slots)
 	for i in shots:
 		var off := 0.0
-		if shots > 1:
-			off = (float(i) - float(shots - 1) * 0.5) * step
+		if i > 0:
+			# 新增弹道交替落位：k=(i+1)/2（int 整除）→ 1,1,2,2,3,3…；side 右,左,右,左…
+			var k: int = (i + 1) / 2
+			var side: float = 1.0 if i % 2 == 1 else -1.0
+			off = float(k) * step * side
 		var proj: Projectile = _b.PROJECTILE_SCENE.instantiate()
 		_b.world.add_child(proj)
 		proj.setup(player_pos, base_ang + off, dmg,
@@ -346,7 +398,10 @@ func cleanup_enemies() -> void:
 			# 金币/经验掉落照常（掉落语义归 cleanup，与击杀计数解耦）。
 			if not e.died_exploded:
 				_b.kills += 1
-			var gv: int = roundi(float(e.gold) * float(_b.player.harvest)) \
+			# 精英金币 ×ELITE_GOLD_MUL（2026-09-22 词缀系统，需求 §2.4「在现有 4 金基础上 ×3」）。
+			# 乘区放在 harvest 之前：收益/存钱罐等既有加成照常作用在这份更高的基础面额上。
+			var gmul: float = GameStats.ELITE_GOLD_MUL if e.type_name == "Elite" else 1.0
+			var gv: int = roundi(float(e.gold) * gmul * float(_b.player.harvest)) \
 				+ int(_b.player.gold_per_kill)
 			spawn_pickup(Pickup.KIND_GOLD, gv, e.global_position)
 			# 幸运（2026-09-20 扩充）：把死属性接入掉落 —— 按 luck 概率【额外】掉一枚同面额金币。
@@ -361,6 +416,11 @@ func cleanup_enemies() -> void:
 					or randf() < GameStats.MAGNET_DROP_CHANCE:
 				spawn_pickup(Pickup.KIND_MAGNET, 0,
 					e.global_position + Vector2(randf_range(-14, 14), randf_range(-14, 14)))
+			# 商店券（2026-09-22 词缀系统，需求 §2.4）：精英【必掉】，拾取后下一家商店 8 折。
+			# 与磁铁同一次落点抖动，但独立判定 —— 精英身上会同时掉两件，是刻意的「精英奖励感」。
+			if e.type_name == "Elite":
+				spawn_pickup(Pickup.KIND_COUPON, 0,
+					e.global_position + Vector2(randf_range(-16, 16), randf_range(-16, 16)))
 			# 死亡爆裂：精英/大怪更大更亮；暴击收掉的最后一下给个短暂 hit-stop
 			burst_requested.emit(e.global_position, e.body_color, e.type_name != "Slime")
 			sfx_requested.emit("kill", -6.0, 1.0)
@@ -369,7 +429,7 @@ func cleanup_enemies() -> void:
 			if not e.died_exploded:
 				var death_line := GameStats.enemy_taunt(String(e.type_name), "death")
 				if death_line != "":
-					float_requested.emit(e.global_position + Vector2(0.0, -e.radius * 2.4),
+					_float(e.global_position + Vector2(0.0, -e.radius * 2.4),
 						death_line, Color(1.0, 0.55, 0.45), false)
 			if e.last_hit_crit:
 				hitstop_requested.emit()
@@ -391,12 +451,18 @@ func collect(pk: Pickup) -> void:
 	if pk.kind == Pickup.KIND_MAGNET:
 		# 磁铁掉落（C3 掉落三件套）：拾取后获得限时全场磁吸
 		_b.player.magnet_all_t = GameStats.MAGNET_ALL_DURATION
-		float_requested.emit(_b.player.global_position + Vector2(0, -30.0),
+		_float(_b.player.global_position + Vector2(0, -30.0),
 			"全场磁吸!", Color(1.0, 0.35, 0.3), true)
 		sfx_requested.emit("coin", -6.0, 1.3)
 	elif pk.kind == Pickup.KIND_GOLD:
 		_b.player.add_gold(pk.value)
 		sfx_requested.emit("coin", -8.0, 1.0)
+	elif pk.kind == Pickup.KIND_COUPON:
+		# 商店券（2026-09-22 词缀系统）：进下一家商店时由 Battle._open_shop 消费 1 张
+		_b.player.shop_coupon += 1
+		_float(_b.player.global_position + Vector2(0, -34.0),
+			"商店券! 下一家商店 8 折", Color(1.0, 0.85, 0.35), true)
+		sfx_requested.emit("coin", -6.0, 1.2)
 	else:
 		_b.player.gain_xp(pk.value)
 		sfx_requested.emit("xp", -12.0, 1.0)
@@ -432,7 +498,7 @@ func rebuild_grid() -> void:
 ## 调用方以为「释放完了」，节点却要到帧末才真的消失。此间网格若还留着这些引用，
 ## 下一帧 `nearby_enemies()` 一读 `e.is_dead` 就报
 ## "Invalid access to property 'is_dead' on a base object of type 'previously freed'"。
-## 忧郁豪暗影弹 pierce=99，玩家弹道会跨波存活，把这条路径从「偶尔踩到」变成「每波必踩」。
+## 忧郁嘉豪暗影弹 pierce=99，玩家弹道会跨波存活，把这条路径从「偶尔踩到」变成「每波必踩」。
 func clear_grid() -> void:
 	_grid.clear()
 
