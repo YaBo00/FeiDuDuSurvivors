@@ -26,6 +26,14 @@ const UNLOCKED_KEY := "unlocked_chars"
 const DEFAULT_UNLOCKED := ["basic"]
 ## 设置项持久化键（2026-09-22 设置菜单）：与结算 int 键/角色解锁分离，单独一个子字典存。
 const SETTINGS_KEY := "settings"
+## 敌人图鉴持久化键（2026-09-22 敌人图鉴，需求《敌人图鉴_给代码AI_2026-09-22.md》§2.3）。
+## 两个都不是结算 int 键（一个是 Array[String]、一个是 Dictionary）⇒ 和 unlocked_chars 一样
+## **不进 KEYS**，在 ledger()/_defaults()/_save() 里单独收口。
+##   seen_enemies    = 击杀过（= 图鉴已解锁）的敌人 id 去重列表
+##   kills_per_enemy = {enemy_id: 累计击杀数}
+## 两者的语义一致性由 record_kills() 单入口保证：解锁与计数永不分家。
+const SEEN_KEY := "seen_enemies"
+const KILLS_KEY := "kills_per_enemy"
 ## 设置项默认值 —— 【唯一的默认源】：读写类型护栏的回落值、UI 初值全部从这里取，
 ## 改这一处即全局生效（music_vol/sfx_vol 是 0~1 线性音量，两个开关是显示类）。
 const DEFAULT_SETTINGS := {
@@ -126,6 +134,21 @@ static func ledger() -> Dictionary:
 	var st = parsed.get(SETTINGS_KEY, null)
 	if typeof(st) == TYPE_DICTIONARY:
 		d[SETTINGS_KEY] = _safe_settings(st)
+	# 敌人图鉴（2026-09-22）：与 unlocked_chars 同款护栏 —— 只收合法敌人 id、去重、计数钳 ≥0。
+	# 坏档（字符串/数字/null）直接保留 _defaults 的空表，never crash。
+	var seen = parsed.get(SEEN_KEY, null)
+	if typeof(seen) == TYPE_ARRAY:
+		for id in seen:
+			var eid := String(id)
+			if GameStats.ENEMY_TEMPLATES.has(eid) and not (d[SEEN_KEY] as Array).has(eid):
+				(d[SEEN_KEY] as Array).append(eid)
+	var kpe = parsed.get(KILLS_KEY, null)
+	if typeof(kpe) == TYPE_DICTIONARY:
+		for id in kpe:
+			var kid := String(id)
+			var n := _safe_int(kpe[id])
+			if GameStats.ENEMY_TEMPLATES.has(kid) and n > 0:
+				(d[KILLS_KEY] as Dictionary)[kid] = n
 	return d
 
 
@@ -194,6 +217,21 @@ static func purchase(id: String) -> bool:
 	return true
 
 
+## 调试用：直接设定某个强化的等级（金手指面板「给任意 Meta 升级加 X 层」）。
+## **会写档** —— 面板侧必须先过二次确认（需求 §3.3）。
+## 等级钳进 [0, max_level]；未知 id / 非表内 id 一律拒绝并返回 false（防脏档）。
+## 刻意做成唯一一个「绕过 purchase 的写入口」：purchase 要扣 meta_xp（货币），
+## 而调试就是不想被货币卡住；两条路径都收口在同一个 _save()，档格式不会分叉。
+static func debug_set_level(id: String, level: int) -> bool:
+	var u: Variant = find_upgrade(id)
+	if u == null:
+		return false
+	var d := ledger()
+	d["meta_levels"][id] = clampi(level, 0, int(u["max_level"]))
+	_save(d)
+	return true
+
+
 ## 汇总当前等级的玩家加成（Player / Battle 消费；0 级时全 0 = 零行为变化）。
 ## 返回键（9 个，与 META_UPGRADES 一一对应）：
 ##   atk_mul      攻击乘区（乘）           hp_flat      生命上限平加
@@ -239,6 +277,58 @@ static func unlock_char(id: String) -> bool:
 	arr.append(id)
 	_save(d)
 	return true
+
+
+# ---------------------------------------------------------------- 敌人图鉴（2026-09-22）
+## 图鉴入账：把一局的「每种敌人击杀数」累加进账本并落盘。**唯一写入入口**。
+## 参数 kills = {enemy_type_id: count}（Battle 每局结束后交给这里）。
+##   · 只认 ENEMY_TEMPLATES 里的合法 id（防脏数据）；计数 ≤0 的项直接跳过。
+##   · 同一 id 同时累加 kills_per_enemy 并追加进 seen_enemies（去重）——
+##     「已解锁」与「击杀数 > 0」在数据层同源，不可能出现解锁了却 0 杀的条目。
+## 空字典直接返回（不写盘）—— 保证「没杀过怪的局」不产生任何 IO 与副作用。
+static func record_kills(kills: Dictionary) -> void:
+	if kills.is_empty():
+		return
+	var d := ledger()
+	var seen: Array = d[SEEN_KEY]
+	var counts: Dictionary = d[KILLS_KEY]
+	var touched := false
+	for id in kills.keys():
+		var eid := String(id)
+		if not GameStats.ENEMY_TEMPLATES.has(eid):
+			continue
+		var n := maxi(0, _safe_int(kills[id]))
+		if n <= 0:
+			continue
+		counts[eid] = maxi(0, int(counts.get(eid, 0))) + n
+		if not seen.has(eid):
+			seen.append(eid)
+		touched = true
+	if touched:
+		_save(d)
+
+
+## 图鉴条目状态（UI 专用批量读）：{enemy_id: {"seen": bool, "kills": int}}。
+## 顺序 = GameStats.CODEX_ORDER，13 条只读一次档（图鉴界面别对每格调一次 enemy_kills）。
+static func codex_state() -> Dictionary:
+	var d := ledger()
+	var seen: Array = d[SEEN_KEY]
+	var counts: Dictionary = d[KILLS_KEY]
+	var out := {}
+	for id in GameStats.CODEX_ORDER:
+		var t := String(id)
+		out[t] = {"seen": seen.has(t), "kills": maxi(0, int(counts.get(t, 0)))}
+	return out
+
+
+## 单个敌人是否已解锁（击杀过）。未知 id 恒 false。
+static func enemy_seen(type_name: String) -> bool:
+	return (ledger()[SEEN_KEY] as Array).has(type_name)
+
+
+## 单个敌人累计击杀数（未知 id / 未击杀 = 0）。
+static func enemy_kills(type_name: String) -> int:
+	return maxi(0, int((ledger()[KILLS_KEY] as Dictionary).get(type_name, 0)))
 
 
 # ---------------------------------------------------------------- 设置项（2026-09-22 设置菜单）
@@ -316,6 +406,8 @@ static func _defaults() -> Dictionary:
 	d["meta_levels"] = {}
 	d[UNLOCKED_KEY] = DEFAULT_UNLOCKED.duplicate()
 	d[SETTINGS_KEY] = DEFAULT_SETTINGS.duplicate(true)
+	d[SEEN_KEY] = []
+	d[KILLS_KEY] = {}
 	return d
 
 
@@ -331,5 +423,33 @@ static func _save(d: Dictionary) -> bool:
 	out[UNLOCKED_KEY] = d.get(UNLOCKED_KEY, DEFAULT_UNLOCKED)
 	# 设置项：写前再过一遍护栏，保证落盘的永远是合法类型/范围（防脏数据回写）。
 	out[SETTINGS_KEY] = _safe_settings(d.get(SETTINGS_KEY, DEFAULT_SETTINGS))
+	# 敌人图鉴：写前同样过滤（防外部直改 ledger 返回的字典把脏数据写回去）。
+	out[SEEN_KEY] = _safe_seen(d.get(SEEN_KEY, []))
+	out[KILLS_KEY] = _safe_kills(d.get(KILLS_KEY, {}))
 	f.store_string(JSON.stringify(out, "  "))
 	return true
+
+
+## 图鉴解锁列表护栏：只留合法敌人 id、去重、保持顺序。非数组一律返回空表。
+static func _safe_seen(raw: Variant) -> Array:
+	var out: Array = []
+	if typeof(raw) != TYPE_ARRAY:
+		return out
+	for id in raw:
+		var eid := String(id)
+		if GameStats.ENEMY_TEMPLATES.has(eid) and not out.has(eid):
+			out.append(eid)
+	return out
+
+
+## 图鉴击杀数护栏：只留合法敌人 id 且计数 ≥1（0/负数 = 与「未解锁」同义，直接丢弃）。
+static func _safe_kills(raw: Variant) -> Dictionary:
+	var out := {}
+	if typeof(raw) != TYPE_DICTIONARY:
+		return out
+	for id in raw:
+		var eid := String(id)
+		var n := _safe_int(raw[id])
+		if GameStats.ENEMY_TEMPLATES.has(eid) and n > 0:
+			out[eid] = n
+	return out

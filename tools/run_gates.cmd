@@ -143,6 +143,11 @@ rem 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会�
 "%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeEliteAffix.gd > "%P%\_g31_last.txt" 2>&1
 if errorlevel 1 (echo   FAIL ^（详见 _g31_last.txt^） & set FAIL=1) else (echo   ok)
 
+echo [32/32] enemy codex - order table / reachable via pools-elites-boss / record_kills + persist / dirty-save guardrails / cleanup_enemies counts per type
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27/28/29/30/31)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeCodex.gd > "%P%\_g32_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL ^（详见 _g32_last.txt^） & set FAIL=1) else (echo   ok)
+
 echo.
 if %FAIL%==0 (echo ALL GATES PASS) else (echo SOME GATES FAILED)
 exit /b %FAIL%

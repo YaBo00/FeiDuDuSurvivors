@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+	<meta name="mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+	<meta name="theme-color" content="#0b0b12">
+	<title>$GODOT_PROJECT_NAME</title>
+	<style>
+		* { box-sizing: border-box; }
+		html, body, #canvas {
+			margin: 0; padding: 0; border: 0;
+			width: 100%; height: 100%;
+		}
+		body {
+			color: #e8e8f0;
+			background: #0b0b12;
+			overflow: hidden;
+			touch-action: none;
+			-webkit-user-select: none; user-select: none;
+			-webkit-touch-callout: none;
+			-webkit-tap-highlight-color: transparent;
+			overscroll-behavior: none;
+		}
+		#canvas { display: block; outline: none; touch-action: none; }
+
+		#status {
+			position: fixed; inset: 0; z-index: 20;
+			display: flex; flex-direction: column;
+			align-items: center; justify-content: center;
+			gap: 18px; padding: 24px; text-align: center;
+			background: radial-gradient(circle at 50% 40%, #1a1a2e 0%, #0b0b12 70%);
+			font: 500 16px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+			transition: opacity .35s ease;
+		}
+		#status.done { opacity: 0; pointer-events: none; }
+		#status .brand { font-size: 22px; font-weight: 700; letter-spacing: .06em; }
+		#status .bar {
+			width: min(320px, 72vw); height: 8px;
+			border-radius: 999px; background: #2a2a3d; overflow: hidden;
+		}
+		#status .bar > i {
+			display: block; height: 100%; width: 0%;
+			border-radius: 999px;
+			background: linear-gradient(90deg, #5b8cff, #9b6bff);
+			transition: width .2s ease;
+		}
+		#status .hint { font-size: 13px; color: #9a9ab0; max-width: 30em; min-height: 1.4em; }
+		#status .foot { font-size: 12px; color: #6c6c85; max-width: 32em; }
+
+		#notice {
+			display: none; max-width: min(520px, 88vw);
+			background: #5b3943; border: 1px solid #9b3943; border-radius: .5rem;
+			color: #e0e0e0; line-height: 1.35; padding: 1rem; text-align: center;
+		}
+
+		/* 桌面键盘提示（无触摸设备才显示，JS 控制） */
+		#kbd {
+			display: none; font-size: 13px; color: #9a9ab0;
+			background: rgba(91, 140, 255, 0.08); border: 1px solid rgba(91, 140, 255, 0.25);
+			border-radius: .5rem; padding: .6rem 1rem; max-width: min(560px, 88vw);
+			line-height: 1.6;
+		}
+		#kbd b { color: #cdd6f4; font-weight: 600; }
+		#status.done #kbd { display: none; }
+	</style>
+	$GODOT_HEAD_INCLUDE
+</head>
+<body>
+	<canvas id="canvas">
+		你的浏览器不支持 HTML5 canvas，请使用较新版本的 Chrome / Safari / Edge。
+	</canvas>
+
+	<div id="status">
+		<div class="brand">$GODOT_PROJECT_NAME</div>
+		<div class="bar"><i id="bar"></i></div>
+		<div class="hint" id="hint">正在加载游戏资源…</div>
+		<div id="notice"></div>
+		<div id="kbd"><b>电脑端操作</b>：WASD / 方向键 移动 · 空格 用道具 · ESC 暂停 · 鼠标点击界面按钮</div>
+		<div class="foot">首次进入需下载约 100 MB 引擎与资源，之后会走浏览器缓存，秒开。手机横屏竖屏都可以玩。</div>
+	</div>
+
+	<script src="$GODOT_URL"></script>
+	<script>
+const GODOT_CONFIG = $GODOT_CONFIG;
+const GODOT_THREADS_ENABLED = $GODOT_THREADS_ENABLED;
+const engine = new Engine(GODOT_CONFIG);
+
+(function () {
+	const statusEl = document.getElementById('status');
+	const barEl = document.getElementById('bar');
+	const hintEl = document.getElementById('hint');
+	const noticeEl = document.getElementById('notice');
+	const canvas = document.getElementById('canvas');
+
+	function showNotice(text) {
+		statusEl.classList.remove('done');
+		barEl.style.width = '100%';
+		barEl.style.background = '#e05b5b';
+		noticeEl.style.display = 'block';
+		noticeEl.textContent = text;
+		hintEl.textContent = '';
+	}
+
+	function setProgress(p) {
+		barEl.style.width = p + '%';
+		hintEl.textContent = '正在加载游戏资源… ' + p + '%';
+	}
+
+	// 让 canvas 拿到键盘焦点（桌面）；手机上主要靠触摸。
+	canvas.addEventListener('pointerdown', function () { canvas.focus(); });
+
+	// 桌面（无触摸能力）显示键盘操作提示；触屏设备靠虚拟摇杆，不显示。
+	(function () {
+		var hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+		if (!hasTouch) {
+			document.getElementById('kbd').style.display = 'block';
+		}
+	})();
+
+	// 特性检测：缺 WebGL2 等直接给可读提示，而不是白屏。
+	if (typeof Engine.getMissingFeatures === 'function') {
+		let missing = [];
+		try { missing = Engine.getMissingFeatures({ threads: GODOT_THREADS_ENABLED }) || []; }
+		catch (e) { missing = []; }
+		if (missing.length !== 0) {
+			showNotice('当前浏览器缺少运行所需特性：' + missing.join('、') +
+				'。请改用最新版 Chrome / Safari / Edge，并确认已开启硬件加速。');
+			return;
+		}
+	} else if (typeof Engine.isWebGLAvailable === 'function' && !Engine.isWebGLAvailable()) {
+		showNotice('当前浏览器不支持 WebGL，无法运行本游戏。请改用最新版 Chrome / Safari / Edge。');
+		return;
+	}
+
+	// Godot 4.x 官方启动方式：startGame 会自动加载 wasm、预载 pck 并启动。
+	// onProgress 报告的是 wasm+pck 的下载进度（大头）。
+	engine.startGame({
+		'onProgress': function (current, total) {
+			if (current > 0 && total > 0) {
+				setProgress(Math.min(100, Math.round((current / total) * 100)));
+			}
+		},
+	}).then(function () {
+		statusEl.classList.add('done');
+		canvas.focus(); // 桌面端免点击直接可键盘操作
+	}, function (err) {
+		showNotice('启动失败：' + (err && err.message ? err.message : err) +
+			'（若是网络中断，刷新页面即可重试）');
+	});
+}());
+	</script>
+</body>
+</html>

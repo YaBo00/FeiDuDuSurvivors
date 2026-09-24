@@ -47,11 +47,24 @@ func _ready() -> void:
 	UiFont.install(_root, 20)
 	UiTheme.apply(_root)
 
+	# 商店背景大图（2026-09-22，商店背景_夜间杂货铺）：整个铺满、最底层。
+	# 图缺（未导入 / 缺美术）时不建节点，暗罩保持原 0.72 —— 旧观感逐位不变，没美术也能跑。
+	var bg := TextureRect.new()
+	bg.texture = AssetDB.bg("shop")
+	if bg.texture != null:
+		bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+		bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_root.add_child(bg)
+
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.72)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(dim)
+	if bg.texture != null:
+		dim.color = Color(0, 0, 0, 0.35)   # 有背景图时只压一点，让图透出来、卡片仍清晰
 
 	_hint = _make_label(120.0, 30.0, Color(0.85, 0.87, 0.95))
 	_hint.text = "商店"

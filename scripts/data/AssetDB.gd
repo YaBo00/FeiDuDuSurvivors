@@ -16,8 +16,8 @@ extends RefCounted
 ##   drops\    掉落物（64x64）
 ##   items\    道具图标（128x128）
 ##   ui\       UI 元件（128x128）
-##   bg\       背景（title/charsel 为 1600x900 有损 WebP；
-##             floor_* 为 2048x2048 波次主题地面方图 —— 居中徽章式地砖，按瓦片格比例
+##   bg\       背景（title/charsel/result_win/result_lose/shop 为 1920×1080 有损 WebP，单张铺满；
+##             floor_* 为 2048×2048 波次主题地面方图 —— 居中徽章式地砖，按瓦片格比例
 ##             居中裁切后 4x4 拼接，每块等比零变形，见 GameStats.floor_tile_src_rect）
 
 const ROOT := "res://assets/"
@@ -307,6 +307,22 @@ const EXTRA_WEAPON_TEX := {
 	"missile": "weapons/w_missile.png",       # 148×256（绿身红尾翼小火箭，头朝上）
 }
 
+## 副武器【UI 图标】（2026-09-22 用户需求：三把程序化副武器补齐卡面图标）。
+## 与 EXTRA_WEAPON_TEX 的分工 —— 两张表不是一回事：
+##   · EXTRA_WEAPON_TEX  = 游戏内【实体贴图】。只有 orbit / missile 用得上；
+##     闪电 / 冰霜 / 毒云按设计就是程序化绘制的（ExtraWeaponSystem 里的 *_FX 内部类）。
+##   · EXTRA_WEAPON_ICON = 纯【UI 图标】。升级三选一卡面 + HUD 手持行都读它。
+##     orbit / missile 刻意【不登记】—— extra_weapon_icon() 会回落到本体贴图
+##     （一把刀 / 一枚火箭本身就是好图标，没必要重画）。
+## 三张图标由 `docs/review/make_extra_weapon_icons.py` 程序化生成（128×128 RGBA、
+## mipmaps/generate 已置 true），视觉语言与游戏内程序化特效一致（浅蓝锯齿 / 冰蓝六刺 /
+## 绿圈气泡）—— 与 make_button_skin.py 同属「贴图代码化」惯例。
+const EXTRA_WEAPON_ICON := {
+	"lightning": "ui/extra_lightning.png",
+	"ice_nova": "ui/extra_ice_nova.png",
+	"acid": "ui/extra_acid.png",
+}
+
 const UI := {
 	"slot_empty": "ui/slot_empty.png",
 	"joystick_base": "ui/joystick_base.png",
@@ -322,6 +338,12 @@ const UI := {
 const BG := {
 	"title": "bg/title.webp",
 	"charsel": "bg/charsel.webp",
+	## 2026-09-22 结算 / 商店背景（源图 1920×1080，与 title/charsel 同规格 → 有损 WebP）。
+	## 调用方：result_win / result_lose 见 scripts/ui/ResultPanel.gd；
+	##        shop 见 scripts/ui/ShopPanel.gd。取用方式 = TextureRect COVERED 铺满。
+	"result_win": "bg/result_win.webp",     # 结算背景_通关
+	"result_lose": "bg/result_lose.webp",   # 结算背景_失败
+	"shop": "bg/shop.webp",                 # 商店背景_夜间杂货铺
 	## 波次主题地面整图（键 = "floor_" + 主题 id，与 GameStats.FLOOR_THEMES 对齐）
 	## （旧 "grass" 键已删：Godot 版地面走 FLOOR_THEMES 五主题，无 grass；
 	##  png 源文件与 ImportArt 管线映射保留，仅摘除运行时注册。2026-09-20 审查清理）
@@ -330,6 +352,17 @@ const BG := {
 	"floor_marble": "bg/marble.png",
 	"floor_metal": "bg/metal.png",
 	"floor_gilded": "bg/gilded.png",
+}
+
+## 标题画面【三层视差动态背景】（2026-09-22 方案 B）。
+## 见 docs/标题视差背景接入说明_2026-09-22.md；接入代码在 scripts/ui/Title.gd。
+## 每张 3840×1080 RGBA = 1920 原图 + 1920 水平镜像（左右边缘像素一致，天然无缝），
+## 所以视差层可以横向无限重复而不露缝。**刻意不入 BG 表**：BG 的键是整屏静态图 /
+## 波次地面，语义是「一张铺满」；视差层是「可重复滚动的图元」，取用方式与缩放规则都不同。
+const PARALLAX := {
+	"sky": "bg/title_parallax/sky.png",
+	"mid": "bg/title_parallax/mid.png",
+	"front": "bg/title_parallax/front.png",
 }
 
 ## 各类资源的预期尺寸与是否应带 alpha —— 供 scripts/dev/AssetProbe.gd 校验，
@@ -343,6 +376,10 @@ const EXPECT := {
 	"ui/": {"size": Vector2i(128, 128), "alpha": true},
 	"bg/title.webp": {"size": Vector2i(1920, 1080), "alpha": false},
 	"bg/charsel.webp": {"size": Vector2i(1920, 1080), "alpha": false},
+	# 2026-09-22 结算 / 商店背景：1920×1080 不透明有损 WebP（同 title/charsel 规格）。
+	"bg/result_win.webp": {"size": Vector2i(1920, 1080), "alpha": false},
+	"bg/result_lose.webp": {"size": Vector2i(1920, 1080), "alpha": false},
+	"bg/shop.webp": {"size": Vector2i(1920, 1080), "alpha": false},
 	# 波次主题地面：2026-09-19 三调，素材由 1920x1080 整图换成 **2048x2048 正方形**
 	# 「居中徽章式地砖」。不再是 16:9 整铺 —— 由 GameStats.floor_tile_src_rect 按
 	# 瓦片格比例从中心裁内接矩形后 4x4 拼接（每块等比、零变形）。
@@ -351,6 +388,9 @@ const EXPECT := {
 	"bg/marble.png": {"size": Vector2i(2048, 2048), "alpha": false},
 	"bg/metal.png": {"size": Vector2i(2048, 2048), "alpha": false},
 	"bg/gilded.png": {"size": Vector2i(2048, 2048), "alpha": false},
+	# 标题三层视差背景（2026-09-22）：3840×1080 RGBA（1920 原图 + 1920 镜像），带透明底。
+	# 用前缀键一次覆盖 sky/mid/front 三张（三张规格完全一致）。
+	"bg/title_parallax/": {"size": Vector2i(3840, 1080), "alpha": true},
 	# UI 元件尺寸不一，单独声明（card_frame 要当 9-slice 底框用，做了竖版；gold_plate 是横条）
 	"ui/card_frame.png": {"size": Vector2i(224, 288), "alpha": true},
 	"ui/card_frame_sel.png": {"size": Vector2i(224, 288), "alpha": true},
@@ -531,6 +571,15 @@ static func extra_weapon_tex(weapon_id: String) -> Texture2D:
 	return tex(EXTRA_WEAPON_TEX[weapon_id])
 
 
+## 副武器【UI 图标】（升级三选一卡面 / HUD 手持行）。
+## 优先取专属图标表；没登记（orbit / missile）则回落到本体贴图 —— 调用方拿到的
+## 要么是一张能看的图，要么是 null（那就只显示文字，绝不画白方块）。
+static func extra_weapon_icon(weapon_id: String) -> Texture2D:
+	if EXTRA_WEAPON_ICON.has(weapon_id):
+		return tex(EXTRA_WEAPON_ICON[weapon_id])
+	return extra_weapon_tex(weapon_id)
+
+
 ## UI 元件纹理（摇杆 / 卡框 / 金币条 / 按钮等）。未登记或缺图返回 null，调用方自行回落。
 static func ui(key: String) -> Texture2D:
 	if not UI.has(key):
@@ -542,6 +591,14 @@ static func bg(key: String) -> Texture2D:
 	if not BG.has(key):
 		return null
 	return tex(BG[key])
+
+
+## 标题视差背景层（键 sky / mid / front）。未登记或缺图返回 null ——
+## 调用方（Title.gd）据此回落到静态 bg("title")，保证「没美术也能跑」。
+static func parallax_bg(key: String) -> Texture2D:
+	if not PARALLAX.has(key):
+		return null
+	return tex(PARALLAX[key])
 
 
 ## 波次主题地面整图：键约定 = "floor_" + 主题 id（见 GameStats.FLOOR_THEMES）。
@@ -572,6 +629,8 @@ static func all_paths() -> Array[String]:
 		out.append(UI[k])
 	for k in BG.keys():
 		out.append(BG[k])
+	for k in PARALLAX.keys():
+		out.append(PARALLAX[k])
 	for k in WEAPON_BULLETS.keys():
 		out.append(WEAPON_BULLETS[k]["tex"])
 	for k in FX.keys():

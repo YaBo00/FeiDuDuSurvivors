@@ -398,6 +398,8 @@ func cleanup_enemies() -> void:
 			# 金币/经验掉落照常（掉落语义归 cleanup，与击杀计数解耦）。
 			if not e.died_exploded:
 				_b.kills += 1
+				# 图鉴（2026-09-22）：与 kills 同一个门槛累加每类击杀数（自爆同样不算）。
+				_b.note_enemy_kill(String(e.type_name))
 			# 精英金币 ×ELITE_GOLD_MUL（2026-09-22 词缀系统，需求 §2.4「在现有 4 金基础上 ×3」）。
 			# 乘区放在 harvest 之前：收益/存钱罐等既有加成照常作用在这份更高的基础面额上。
 			var gmul: float = GameStats.ELITE_GOLD_MUL if e.type_name == "Elite" else 1.0

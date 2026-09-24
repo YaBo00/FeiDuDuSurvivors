@@ -19,3 +19,6 @@ _*.log
 *.log
 *.tmp
 *~
+
+# Web 发布产物（97MB，可由 tools/export_web.cmd 重新生成；线上发布目录不入库）
+web_player/

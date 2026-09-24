@@ -22,6 +22,12 @@ var _mastery_label: Label
 ## 屏幕中央大字通告（2026-09-20 Boss 狂暴等）：显示 _notice_left 秒后自动隐藏。
 var _notice_label: Label
 var _notice_left := 0.0
+## 副武器栏（2026-09-22 用户需求）：属性面板下方一行「图标 + 等级点」。
+var _extra_row: Control = null
+## 每个槽：{"root": ColorRect, "icon": TextureRect, "pips": Array[ColorRect]}
+var _extra_slots: Array = []
+## 内容指纹（"id:lv," 拼接）。HUD 拍是 0.08s，内容没变时直接返回，不碰任何节点。
+var _extra_sig := ""
 
 const BAR_W := 320.0
 const BAR_H := 22.0
@@ -41,6 +47,27 @@ const CLEAR_BAR_Y := 48.0
 ## 描边用更亮的金黄让粗线条的边界在浅色地面上也立得住。
 const CLEAR_FILL_COLOR := Color("#FFD24A")
 const CLEAR_EDGE_COLOR := Color("#FFF0A8")
+
+## ---- 副武器栏几何（2026-09-22）----
+## 位置：左上属性面板（x=16..294 / y=52..176）正下方同一列，左边界对齐面板。
+## 冲突排查：右上倍速按钮、顶部波次行(y12..46)与清场条(y48..64)、底部血条(y=720-56)、
+## 中央通告(y=216)都在这行之外；触屏摇杆按手指落点动态摆放，也不占固定位。
+const EXTRA_ROW_X := 16.0
+const EXTRA_ROW_Y := 200.0
+const EXTRA_TITLE_H := 18.0
+const EXTRA_SLOT := 56.0
+const EXTRA_SLOT_GAP := 6.0
+const EXTRA_ICON := 38.0
+const EXTRA_PIP_W := 6.0
+const EXTRA_PIP_H := 5.0
+const EXTRA_PIP_GAP := 2.0
+## 满级点数上限：现役 5 把副武器 max_level 都是 5（Stats.extra_weapon_max_level 查表按把取值）。
+const EXTRA_PIPS_MAX := 5
+## 点亮的等级点 = 金色（与清场条同色系：金色一律表示「已到手」）；
+## 未点亮 = 低饱和灰蓝，在深色槽底上仍能看出「还有几格」。
+const EXTRA_PIP_ON := Color("#FFD24A")
+const EXTRA_PIP_OFF := Color(0.30, 0.33, 0.42)
+const EXTRA_SLOT_BG := Color(0.04, 0.04, 0.09, 0.62)
 
 
 func _ready() -> void:
@@ -155,6 +182,67 @@ func _ready() -> void:
 	_stats_label.add_theme_font_size_override("font_size", 15)
 	_stats_label.add_theme_color_override("font_color", Color(0.88, 0.90, 0.97))
 
+	# 副武器栏（2026-09-22 用户需求）：属性面板正下方一行槽位 = 图标 + 等级点。
+	# 解决的问题：副武器「升级了但屏幕上没有任何变化」—— 拿卡前后玩家只能靠场上
+	# 特效（刀变多 / 雷变粗）去猜自己有几把、都几级，信息完全不在 HUD 上。
+	# 槽位按上限预建（见下方：现按副武器全表 5 把预建），未持有的整块隐藏 ⇒ 行随持有数增长。
+	_extra_row = Control.new()
+	_extra_row.position = Vector2(EXTRA_ROW_X, EXTRA_ROW_Y)
+	_extra_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_extra_row.visible = false   # 开局没副武器：整行不显示，不占屏
+	_root.add_child(_extra_row)
+
+	var ex_title := Label.new()
+	ex_title.text = "副武器"
+	ex_title.position = Vector2(0.0, 0.0)
+	ex_title.size = Vector2(200.0, EXTRA_TITLE_H)
+	ex_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ex_title.add_theme_font_size_override("font_size", 13)
+	ex_title.add_theme_color_override("font_color", Color(0.66, 0.70, 0.82))
+	_extra_row.add_child(ex_title)
+
+	# 槽位按【副武器全表长度】预建（不是按 MAX_EXTRA_WEAPONS）：未持有的整块隐藏 ⇒
+	# 视觉结果与「按上限预建」逐像素一致，但金手指面板「解除上限（最多同时 5 把）」
+	# 之后不需要重建 HUD —— 第 3~5 槽已经在树里，set_extra_weapons 一调就亮。
+	for i in GameStats.EXTRA_WEAPON_IDS.size():
+		_extra_slots.append(_build_extra_slot(
+			float(i) * (EXTRA_SLOT + EXTRA_SLOT_GAP), EXTRA_TITLE_H))
+
+
+## 建一个副武器槽：深色底 + 居中图标 + 底部一排等级点（全部 mouse_filter = IGNORE）。
+## 槽内布局写死（图标贴顶居中、点贴底居中），槽位尺寸改常量即可整体缩放。
+func _build_extra_slot(x: float, y: float) -> Dictionary:
+	var slot_bg := ColorRect.new()
+	slot_bg.color = EXTRA_SLOT_BG
+	slot_bg.position = Vector2(x, y)
+	slot_bg.size = Vector2(EXTRA_SLOT, EXTRA_SLOT)
+	slot_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_extra_row.add_child(slot_bg)
+
+	# 图标：等比居中放进 EXTRA_ICON 见方的盒子（源图 128×128，刀/火箭是本体贴图回退）。
+	var icon := TextureRect.new()
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.position = Vector2((EXTRA_SLOT - EXTRA_ICON) * 0.5, 3.0)
+	icon.size = Vector2(EXTRA_ICON, EXTRA_ICON)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slot_bg.add_child(icon)
+
+	var pips: Array[ColorRect] = []
+	var total := float(EXTRA_PIPS_MAX) * EXTRA_PIP_W \
+		+ float(EXTRA_PIPS_MAX - 1) * EXTRA_PIP_GAP
+	var px := (EXTRA_SLOT - total) * 0.5
+	var py := EXTRA_SLOT - EXTRA_PIP_H - 5.0
+	for k in EXTRA_PIPS_MAX:
+		var pip := ColorRect.new()
+		pip.color = EXTRA_PIP_OFF
+		pip.position = Vector2(px + float(k) * (EXTRA_PIP_W + EXTRA_PIP_GAP), py)
+		pip.size = Vector2(EXTRA_PIP_W, EXTRA_PIP_H)
+		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot_bg.add_child(pip)
+		pips.append(pip)
+	return {"root": slot_bg, "icon": icon, "pips": pips}
+
 
 func _make_label(x: float, y: float, w: float, h: float) -> Label:
 	var l := Label.new()
@@ -226,6 +314,40 @@ func set_clear_ratio(r: float) -> void:
 
 func set_visible_hud(v: bool) -> void:
 	_root.visible = v
+
+
+## 副武器栏刷新（2026-09-22）。ids = 已持有的副武器 id（ExtraWeaponSystem.owned_ids()，
+## 顺序固定），levels = id → 当前等级（1 基）。
+## 指纹去重：内容（持有集合 + 各级等级）没变就直接返回 —— HUD 拍 0.08s，
+## 避免每拍重设 TextureRect.texture / 逐点改色。
+## 点亮个数 = 当前等级：Lv1 亮 1 点、Lv3 亮 3 点，升一级多亮一格，肉眼可验。
+func set_extra_weapons(ids: Array[String], levels: Dictionary) -> void:
+	if _extra_row == null:
+		return
+	var sig := ""
+	for id in ids:
+		sig += "%s:%d," % [id, int(levels.get(id, 1))]
+	if sig == _extra_sig:
+		return
+	_extra_sig = sig
+	_extra_row.visible = ids.size() > 0
+	for i in _extra_slots.size():
+		var slot: Dictionary = _extra_slots[i]
+		var slot_bg: ColorRect = slot["root"]
+		if i >= ids.size():
+			slot_bg.visible = false   # 未持有 ⇒ 整槽隐藏（含图标与点）
+			continue
+		slot_bg.visible = true
+		var wid := ids[i]
+		var lv := int(levels.get(wid, 1))
+		var max_lv := GameStats.extra_weapon_max_level(wid)
+		var icon: TextureRect = slot["icon"]
+		icon.texture = AssetDB.extra_weapon_icon(wid)
+		var pips: Array = slot["pips"]
+		for k in pips.size():
+			var pip: ColorRect = pips[k]
+			pip.visible = k < max_lv
+			pip.color = EXTRA_PIP_ON if k < lv else EXTRA_PIP_OFF
 
 
 ## 屏幕中央大字通告（2026-09-20 Boss 狂暴）：显示 dur 秒后自动隐藏。

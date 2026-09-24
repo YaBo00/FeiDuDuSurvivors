@@ -17,6 +17,28 @@ extends RefCounted
 ## [PLACEHOLDER] H5 画布宽 800 → Godot 视口宽 1280，取 1.5 作为统一折算系数。
 const SPATIAL_SCALE := 1.5
 
+# ============================================================ 调试 / 发版开关（2026-09-22 金手指面板）
+#
+# 需求文档：《金手指调试面板_给代码AI_2026-09-22.md》。
+# 这一节是本工程**唯一**允许存在的「调试开关 + 调试注入位」，理由：
+#   · 面板本体（scripts/debug/DebugPanel.gd）不持状态、不反向依赖战斗 —— 它要影响核心逻辑
+#     就必须有一个中立的中转位；放在本文件（叶子模块、无 var、被所有脚本安全引用）最省事，
+#     也避免 DebugPanel ↔ Battle 的双向 class_name 依赖。
+#   · 三个位全部**默认关闭/空**，且只在「面板真的被点开并操作」时才会被写入 ⇒
+#     正常游玩 / 自检 / 门禁探针的行为与写入前【逐位一致】（随机数消耗也不变）。
+
+## 金手指面板总开关。**发版前改成 false**：Battle._ready 不再实例化面板节点，
+## 连左上角「难度」文字上的隐形热区都不会挂 —— 玩家彻底点不出来（零残留在场景树里）。
+const DEBUG_PANEL_ENABLED := true
+
+## 调试注入位 ①「下次三选一必定出现的升级卡 id」（读后即清空，一次性）。
+## 例："cdr" —— 消费点唯一：Battle._generate_options。
+static var debug_force_upgrade := ""
+
+## 调试注入位 ②「下次商店必定上架的道具 id」（读后即清空，一次性）。
+## 例："s_resurrect" —— 消费点唯一：GameStats.shop_roll（开店与刷新都经过它）。
+static var debug_force_item := ""
+
 ## 视口尺寸（与 project.godot 的 viewport_width/height 保持一致）。
 ## 注意：这是【屏幕/设计尺寸】，UI（Hud/商店/结算面板）全部按它绝对定位；
 ## 世界（竞技场）尺寸是独立的 ARENA_W/ARENA_H，见下。
@@ -372,6 +394,17 @@ static func shop_roll(n: int, owned: Variant = null, mastery_level := -1) -> Arr
 			break
 		out.append(pool[pick])
 		weights[pick] = 0.0      # 已抽到的不重复上架（权重清零）
+	# 调试注入（金手指面板「强制出现指定商店道具」）：把指定 id 提到第 0 位，
+	# **绕过前置链与稀有度权重**（调试就是要把买不到的东西摆上来）。
+	# 读取后立即清空 ⇒ 一次性。空串分支不碰 rng_global，故正常游玩/门禁的随机序列逐位不变。
+	var forced := String(debug_force_item)
+	if forced != "":
+		debug_force_item = ""
+		if ITEM_DEFS.has(forced):
+			out.erase(forced)
+			out.insert(0, forced)
+			while out.size() > n:     # 挤掉最后一张，保持「上架 n 张」的语义
+				out.remove_at(out.size() - 1)
 	return out
 
 
@@ -873,29 +906,36 @@ static func weapon_color(id: String) -> Color:
 #   behavior        运行时分支键：orbit / lightning / ice_nova / acid
 #   max_level       最高等级（满级后升级卡消失）
 #   tiers           逐级参数表，长度 == max_level
-#   icon            升级卡图标相对路径（可选；缺失 = 不画图，其余照常）
+#   （图标）         本表【不】管图标：升级三选一卡面与 HUD 手持行统一读
+#                   `AssetDB.extra_weapon_icon(id)`（三把程序化副武器走 EXTRA_WEAPON_ICON，
+#                   orbit / missile 回落到本体贴图）。2026-09-22：旧的 `icon` 字段是
+#                   全工程零消费点的死数据（且 orbit 的值与实际路径对不上），已删除。
 #
 # ⚠️ 数值全部 [PLACEHOLDER]，playtest 后只改本表（与 WEAPON_DEFS 同一纪律）。
 const EXTRA_WEAPON_DEFS := {
 	# ---- 环绕飞刃（近战 AOE，纯持续型：没有冷却，靠转速与刀数吃成长）----
 	# ★ 贴图需求：一张刀（64×64 透明底，刀身朝右）。缺失时回落到程序化画法。
+	# 刀数曲线（2026-09-22 Bo 定）：2 → 3 → 5 → 8 → 12（原 2/2/3/3/4）。
+	# 半径曲线（同日 Bo 定）：80 → 90 → 100 → 110 → 120，逐级 +10（原 80/95/95/95/110）。
+	# 两条曲线都是逐级递增 ⇒ 每级都看得出「刀更多 + 圈更大」，不再有级间停顿。
+	# ⚠️ DPS ≈ 刀数 × 单次伤害 ÷ 逐刀命中间隔（ORBIT_HIT_CD 是按【每把刀】独立计的），
+	#    所以 Lv4→Lv5 的 8→12 是 +50% 输出，Lv1→Lv5 整体约 ×3（dmg_mul 未同步下调）。
+	#    若 playtest 觉得过强，优先动 dmg_mul（Lv5 1.2 → 0.6 左右）而不是动刀数曲线。
 	"orbit": {
 		"name": "环绕飞刃", "desc": "飞刃绕你旋转，碰到敌人就造成伤害",
 		"color": Color(1.0, 0.62, 0.22), "behavior": "orbit", "max_level": 5,
-		"icon": "weapons/orbit.png",
 		"tiers": [
 			{"count": 2, "dmg_mul": 0.6, "radius": 80.0, "rot": 2.0, "slow": 0.0},
-			{"count": 2, "dmg_mul": 0.8, "radius": 95.0, "rot": 2.0, "slow": 0.0},
-			{"count": 3, "dmg_mul": 0.8, "radius": 95.0, "rot": 2.0, "slow": 0.0},
-			{"count": 3, "dmg_mul": 1.0, "radius": 95.0, "rot": 3.0, "slow": 0.0},
-			{"count": 4, "dmg_mul": 1.2, "radius": 110.0, "rot": 3.0, "slow": 0.2},
+			{"count": 3, "dmg_mul": 0.8, "radius": 90.0, "rot": 2.0, "slow": 0.0},
+			{"count": 5, "dmg_mul": 0.8, "radius": 100.0, "rot": 2.0, "slow": 0.0},
+			{"count": 8, "dmg_mul": 1.0, "radius": 110.0, "rot": 3.0, "slow": 0.0},
+			{"count": 12, "dmg_mul": 1.2, "radius": 120.0, "rot": 3.0, "slow": 0.2},
 		],
 	},
 	# ---- 闪电链（周期劈击，程序化折线，无需贴图）----
 	"lightning": {
 		"name": "闪电链", "desc": "每隔一段时间劈下一道闪电，并链到附近的敌人",
 		"color": Color(0.75, 0.9, 1.0), "behavior": "lightning", "max_level": 5,
-		"icon": "",
 		"tiers": [
 			{"interval": 2.0, "dmg_mul": 1.2, "chains": 2, "targets": 1},
 			{"interval": 1.8, "dmg_mul": 1.4, "chains": 2, "targets": 1},
@@ -908,7 +948,6 @@ const EXTRA_WEAPON_DEFS := {
 	"ice_nova": {
 		"name": "冰霜新星", "desc": "周期性冻结身边的敌人，等级越高范围越大",
 		"color": Color(0.55, 0.85, 1.0), "behavior": "ice_nova", "max_level": 5,
-		"icon": "",
 		"tiers": [
 			{"interval": 3.0, "radius": 90.0, "freeze": 0.5, "dmg_mul": 0.0},
 			{"interval": 3.0, "radius": 100.0, "freeze": 0.6, "dmg_mul": 0.2},
@@ -918,16 +957,21 @@ const EXTRA_WEAPON_DEFS := {
 		],
 	},
 	# ---- 毒云（地形控制：在脚下留毒，站上去持续掉血，程序化绿圈，无需贴图）----
+	# 半径曲线（2026-09-22 Bo 定）：60 → 80 → 100 → 120 → 150（原 60/70/80/90/100）。
+	# 末级刻意跳到 +30（前面都是 +20）—— 让 Lv5 一眼看出「圈炸开了」。
+	# ⚠️ 毒池是【面积】型收益：覆盖面积 ∝ 半径² ⇒ Lv5/Lv1 = (150/60)² ≈ 6.25 倍，
+	#    而 dps_mul 只从 0.3 → 1.0。所以实际强度增长远大于表上数字，
+	#    且多次落池重叠时的收益更明显（MAX_ACID_POOLS 与 tick 间隔都没动）。
+	#    若 playtest 觉得过强，优先压 dps_mul，别回退半径（半径是这次要的「看得见」）。
 	"acid": {
 		"name": "毒云", "desc": "周期性在脚下留一滩毒，站上去持续掉血",
 		"color": Color(0.45, 0.85, 0.35), "behavior": "acid", "max_level": 5,
-		"icon": "",
 		"tiers": [
 			{"interval": 2.5, "life": 2.0, "radius": 60.0, "dps_mul": 0.3, "vuln": 1.0},
-			{"interval": 2.5, "life": 2.5, "radius": 70.0, "dps_mul": 0.5, "vuln": 1.0},
-			{"interval": 2.0, "life": 2.5, "radius": 80.0, "dps_mul": 0.6, "vuln": 1.0},
-			{"interval": 2.0, "life": 3.0, "radius": 90.0, "dps_mul": 0.8, "vuln": 1.0},
-			{"interval": 2.0, "life": 3.0, "radius": 100.0, "dps_mul": 1.0, "vuln": 1.2},
+			{"interval": 2.5, "life": 2.5, "radius": 80.0, "dps_mul": 0.5, "vuln": 1.0},
+			{"interval": 2.0, "life": 2.5, "radius": 100.0, "dps_mul": 0.6, "vuln": 1.0},
+			{"interval": 2.0, "life": 3.0, "radius": 120.0, "dps_mul": 0.8, "vuln": 1.0},
+			{"interval": 2.0, "life": 3.0, "radius": 150.0, "dps_mul": 1.0, "vuln": 1.2},
 		],
 	},
 	# ---- 追踪导弹（第 5 把，2026-09-22 补做：豆包已出图 w_missile.png）----
@@ -937,7 +981,6 @@ const EXTRA_WEAPON_DEFS := {
 	"missile": {
 		"name": "追踪导弹", "desc": "自动追踪最近的敌人，命中后爆炸",
 		"color": Color(0.86, 0.95, 0.78), "behavior": "missile", "max_level": 5,
-		"icon": "weapons/w_missile.png",
 		"tiers": [
 			{"interval": 2.0, "count": 1, "dmg_mul": 1.5, "blast": 40.0},
 			{"interval": 2.0, "count": 1, "dmg_mul": 2.0, "blast": 50.0},
@@ -953,6 +996,19 @@ const EXTRA_WEAPON_IDS: Array[String] = ["orbit", "lightning", "ice_nova", "acid
 
 ## 副武器同时持有上限（主角武器不计入）。
 const MAX_EXTRA_WEAPONS := 2
+
+## 调试用上限覆盖（金手指面板「解除上限」勾选时置为 EXTRA_WEAPON_IDS.size()）。
+## 默认 -1 = 不覆盖 ⇒ 所有读取点拿到的都是 MAX_EXTRA_WEAPONS，行为逐位不变。
+## **不落盘、不跨进程**：面板只在运行期写它，进程退出即消失。
+static var extra_weapon_cap_override := -1
+
+
+## 副武器持有上限的【唯一读取口】（grant 判定 / 出卡判定 / HUD 槽位都读它）——
+## 早期直接读 MAX_EXTRA_WEAPONS 的三处会在「解除上限」后各说各话，故收口成一个函数。
+static func extra_weapon_cap() -> int:
+	if extra_weapon_cap_override > 0:
+		return mini(extra_weapon_cap_override, EXTRA_WEAPON_IDS.size())
+	return MAX_EXTRA_WEAPONS
 
 ## 抽卡出现率：每次升级/波末三选一，按此概率把一张副武器卡【替换】进选项里。
 ## 文档 §3 要求「约普通升级卡权重的 1/3」—— 用替换而不是追加：
@@ -1003,6 +1059,27 @@ const MISSILE_SPREAD_DEG := 22.0
 ## 打折而不是免疫 —— 冻结仍然有效，只是控不住 Boss 太久。
 const EXTRA_FREEZE_BOSS_MUL := 0.5
 const EXTRA_SLOW_BOSS_MUL := 0.5
+
+# ---- 副武器「每级可见锚点」视觉常量（2026-09-22 用户需求）----
+# 背景：副武器的成长原本只体现在【数量】与【尺寸】上 —— 20 个升级档里有 12 档画面上与
+# 上一级完全一样（闪电只改 interval、冰霜/毒云只 +10px 半径）。这组常量给每把武器一个
+# 【逐级都看得出来】的视觉锚点，让玩家升级后立刻「看见」自己变强，而不是只有数值变。
+# ⚠️ 口径：只吃【副武器等级】（0 基），绝不参与伤害/判定/随机 —— 纯表现层。
+const BLADE_VIS_LEN_BASE := 46.0          # 环绕飞刃刀身视觉长度基准（px，= 旧版写死值）
+const BLADE_VIS_LEN_PER_LV := 3.0         # 每级加长（Lv5 时 58px）
+const LIGHTNING_VIS_WIDTH_MUL_PER_LV := 0.13   # 闪电折线宽度/亮度随级（Lv5 ×1.52）
+const LIGHTNING_VIS_JAG_MUL_PER_LV := 0.10     # 锯齿振幅随级
+const ICE_VIS_SPIKES: Array[int] = [6, 6, 8, 8, 10]    # 冰晶刺数（索引 = 等级-1）
+const ACID_VIS_BUBBLES: Array[int] = [4, 5, 6, 7, 8]   # 毒池边缘气泡数（索引 = 等级-1）
+const ACID_VIS_FILL_ALPHA := 0.26         # 毒池填充浓度基准（= 旧版写死值）
+const ACID_VIS_FILL_ALPHA_PER_LV := 0.035 # 每级加深（越高级的毒越「浓」）
+const MISSILE_VIS_SIZE_BASE := 40.0       # 导弹弹体视觉尺寸基准（px，= 旧版写死值）
+const MISSILE_VIS_SIZE_PER_LV := 2.5      # 每级放大（Lv5 时 50px）
+## 毒池淡出分段：末段比例（0.30 = 前 70% 保持满不透明，最后 30% 才线性淡出）。
+## 旧行为是【全程线性变淡】—— 2s 的池子到 1.5s 时填充只剩 6.5%，观感上「毒已经没了」
+## 但伤害还在跳（表现与判定不一致）。改成末段淡出后，池子「看得见」的时间与「打得着」
+## 的时间基本重合，最后 30% 的淡出只作「即将消失」的提示。
+const ACID_POOL_FADE_TAIL := 0.30
 
 
 ## 取副武器定义（副本，调用方可安全读改）。未知 id 返回空字典。
@@ -1166,27 +1243,64 @@ const SPAWN_GROWTH := 10
 ## Math.round(e.def*0.5) → undefined*0.5 = NaN → e.hp -= NaN → hp 变 NaN
 ## → (hp<=0) 恒为 false → 敌人永远打不死，击杀/金币/升级闭环全断。
 ## Godot 版从数据结构层面杜绝该路径：def 一定是有定义的整数。
+## codex_name / codex_desc（2026-09-22 敌人图鉴）：图鉴界面的名字与一句吐槽文案。
+## **只有进图鉴的敌人才登记**（Medium 与各种分裂/召唤产物不进，见表下方 CODEX_ORDER）。
 const ENEMY_TEMPLATES := {
-	"Slime": {"hp": 20, "dmg": 5, "spd": 60, "radius": 12, "gold": 1, "def": 0, "behavior": "melee"},
+	"Slime": {"hp": 20, "dmg": 5, "spd": 60, "radius": 12, "gold": 1, "def": 0, "behavior": "melee",
+		"codex_name": "史莱姆", "codex_desc": "最基础的史莱姆，哪里都有它。"},
+	# Medium 刻意不登记 codex 字段：它是「肥嘟嘟袋鼠怪」的数值替身，不在图鉴顺序表里。
 	"Medium": {"hp": 50, "dmg": 10, "spd": 80, "radius": 16, "gold": 2, "def": 0, "behavior": "melee"},
 	# Elite 血量 120 → 360（2026-09-20 用户要求「精英怪提升至 3 倍」，精确 ×3）。
 	# 精英不进普通怪波次池（spawn_types 无 Elite）⇒ 不影响 Boss 动态血的 avg 基准。
-	"Elite": {"hp": 360, "dmg": 15, "spd": 70, "radius": 20, "gold": 4, "def": 0, "behavior": "melee"},
-	"Ranged": {"hp": 35, "dmg": 8, "spd": 55, "radius": 14, "gold": 3, "def": 0, "behavior": "ranged"},
-	"Boss": {"hp": 600, "dmg": 25, "spd": 45, "radius": 36, "gold": 25, "def": 0, "behavior": "boss"},
+	"Elite": {"hp": 360, "dmg": 15, "spd": 70, "radius": 20, "gold": 4, "def": 0, "behavior": "melee",
+		"codex_name": "精英怪", "codex_desc": "带词缀的精英，颜色不一样，打掉有奖励。"},
+	"Ranged": {"hp": 35, "dmg": 8, "spd": 55, "radius": 14, "gold": 3, "def": 0, "behavior": "ranged",
+		"codex_name": "远程怪", "codex_desc": "站远处扔东西的，优先处理。"},
+	"Boss": {"hp": 600, "dmg": 25, "spd": 45, "radius": 36, "gold": 25, "def": 0, "behavior": "boss",
+		"codex_name": "袋鼠王", "codex_desc": "最终 Boss，蹦蹦拳。"},
 	# ---- 2026-09-20 新敌人批次（docs/新敌人_代码接入说明_2026-09-20.md §2 数值原文粘贴，全 [PLACEHOLDER]）----
-	"Rat": {"hp": 12, "dmg": 4, "spd": 95, "radius": 10, "gold": 1, "def": 0, "behavior": "melee"},
-	"Student": {"hp": 8, "dmg": 6, "spd": 110, "radius": 12, "gold": 2, "def": 0, "behavior": "melee"},
-	"Charger": {"hp": 45, "dmg": 14, "spd": 55, "radius": 14, "gold": 3, "def": 0, "behavior": "charger"},
-	"Ox": {"hp": 180, "dmg": 18, "spd": 35, "radius": 24, "gold": 5, "def": 0, "behavior": "melee"},
-	"Splitter": {"hp": 60, "dmg": 8, "spd": 55, "radius": 16, "gold": 2, "def": 0, "behavior": "splitter"},
-	"Bomber": {"hp": 30, "dmg": 20, "spd": 85, "radius": 13, "gold": 2, "def": 0, "behavior": "bomber"},
-	"Slacker": {"hp": 35, "dmg": 8, "spd": 50, "radius": 14, "gold": 3, "def": 0, "behavior": "ranged"},
-	"Monitor": {"hp": 50, "dmg": 5, "spd": 45, "radius": 14, "gold": 4, "def": 0, "behavior": "support"},
+	"Rat": {"hp": 12, "dmg": 4, "spd": 95, "radius": 10, "gold": 1, "def": 0, "behavior": "melee",
+		"codex_name": "鼠鼠", "codex_desc": "上班路上的鼠鼠，卷又卷不动，躺又躺不平。"},
+	"Student": {"hp": 8, "dmg": 6, "spd": 110, "radius": 12, "gold": 2, "def": 0, "behavior": "melee",
+		"codex_name": "脆皮大学生", "codex_desc": "考试周的大学生，血薄但数量多。"},
+	"Charger": {"hp": 45, "dmg": 14, "spd": 55, "radius": 14, "gold": 3, "def": 0, "behavior": "charger",
+		"codex_name": "卷王", "codex_desc": "卷王本王，冲起来谁都拦不住。"},
+	"Ox": {"hp": 180, "dmg": 18, "spd": 35, "radius": 24, "gold": 5, "def": 0, "behavior": "melee",
+		"codex_name": "牛马", "codex_desc": "牛马，沉默地干活，沉默地撞你。"},
+	"Splitter": {"hp": 60, "dmg": 8, "spd": 55, "radius": 16, "gold": 2, "def": 0, "behavior": "splitter",
+		"codex_name": "精神内耗", "codex_desc": "精神内耗体，打烂了还会分裂成两个。"},
+	"Bomber": {"hp": 30, "dmg": 20, "spd": 85, "radius": 13, "gold": 2, "def": 0, "behavior": "bomber",
+		"codex_name": "班味炸弹", "codex_desc": "班味拉满的炸弹人，走近了就自爆。"},
+	"Slacker": {"hp": 35, "dmg": 8, "spd": 50, "radius": 14, "gold": 3, "def": 0, "behavior": "ranged",
+		"codex_name": "摸鱼怪", "codex_desc": "摸鱼的，躲在后面不冲。"},
+	"Monitor": {"hp": 50, "dmg": 5, "spd": 45, "radius": 14, "gold": 4, "def": 0, "behavior": "support",
+		"codex_name": "班长", "codex_desc": "班长，给周围怪加 buff。"},
 	# BossPUA：复用 boss 三招状态机；召唤类型/数量/群体加速走模板字段（见 Enemy._start_active）
 	"BossPUA": {"hp": 800, "dmg": 20, "spd": 40, "radius": 30, "gold": 30, "def": 0, "behavior": "boss",
-		"summon_type": "Rat", "summon_count": 2, "summon_aura": [1.3, 3.0]},
+		"summon_type": "Rat", "summon_count": 2, "summon_aura": [1.3, 3.0],
+		"codex_name": "PUA 老板", "codex_desc": "老板，画饼大师，会召唤新员工。"},
 }
+
+# ---- 敌人图鉴（2026-09-22，需求见《敌人图鉴_给代码AI_2026-09-22.md》）----
+## 图鉴显示顺序 = 玩家「应该」遇到敌人的顺序（波 1 的杂鱼 → 波 10/20 的 Boss）。
+## **没在表里的敌人不进图鉴**：Medium（袋鼠怪数值替身）、Splitter 分裂出的小 Rat、
+## Boss 召唤的杂鱼、精英召唤/召唤词缀产物 —— 它们要么是重复 id，要么是纯技能产物。
+const CODEX_ORDER := ["Slime", "Rat", "Student", "Charger", "Ox", "Splitter", "Bomber",
+	"Slacker", "Monitor", "Ranged", "Elite", "BossPUA", "Boss"]
+
+
+## 图鉴文案查询（缺字段返回空串 —— 调用方空串即「不进图鉴」，不崩）。
+static func codex_name(type_name: String) -> String:
+	return String(enemy_template(type_name).get("codex_name", ""))
+
+
+static func codex_desc(type_name: String) -> String:
+	return String(enemy_template(type_name).get("codex_desc", ""))
+
+
+## 该类型是否进图鉴（唯一判定口径：在 CODEX_ORDER 里）。
+static func is_codex_enemy(type_name: String) -> bool:
+	return CODEX_ORDER.has(type_name)
 
 # ---- 新敌人行为常量（2026-09-20，数值来自接入说明 §3，全 [PLACEHOLDER] 待 --balance）----
 ## charger（卷王）：玩家进入 250px → 前摇 0.6s（闪红锁定方向）→ 沿锁定方向 spd×3.5 冲 0.5s → 硬直 0.8s
