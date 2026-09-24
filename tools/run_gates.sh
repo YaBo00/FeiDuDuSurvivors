@@ -119,6 +119,11 @@ echo "[31/31] elite affix system - table / spawn curve (wave>=5, 1+wave/8) / swi
 "$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeEliteAffix.gd > "$P/_g31_last.txt" 2>&1
 pass $?
 
+echo "[32/32] enemy codex - order table / reachable via pools-elites-boss / record_kills + persist / dirty-save guardrails / cleanup_enemies counts per type"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29][30][31]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeCodex.gd > "$P/_g32_last.txt" 2>&1
+pass $?
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部门禁 PASS"; else echo "有门禁未通过"; fi
 exit "$FAIL"

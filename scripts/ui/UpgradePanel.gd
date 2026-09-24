@@ -176,8 +176,11 @@ func show_options(options: Array, wave_num: int, reason_text: String, on_choice:
 			# 图标可能没有（某项还没配图）—— 那就隐藏图标框，布局自动收回
 			var tex := AssetDB.upgrade_icon(String(opt["id"]))
 			if tex == null and opt.has("weapon_id"):
-				# 副武器卡（2026-09-22）：没有专属升级图标，直接用武器本体贴图当卡面图
-				tex = AssetDB.extra_weapon_tex(String(opt["weapon_id"]))
+				# 副武器卡（2026-09-22）：走 extra_weapon_icon —— 它优先取专属 UI 图标
+				# （闪电 / 冰霜 / 毒云三张程序化图标），没登记时才回落到本体贴图
+				# （飞刃 / 导弹）。⚠️ 之前这里直接读 extra_weapon_tex：那三把按设计
+				# 本来就没有实体贴图 ⇒ 卡面恒为空白，三张新图标等于没接上。
+				tex = AssetDB.extra_weapon_icon(String(opt["weapon_id"]))
 			_icons[i].texture = tex
 			_icons[i].visible = tex != null
 		else:

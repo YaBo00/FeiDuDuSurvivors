@@ -7,6 +7,9 @@ var _title: Label
 var _stats: Label
 var _hint: Label
 var _back: Button
+## 结算背景大图（2026-09-22）与其上的压暗罩。图缺时不显示 _bg，_dim 保持原 0.72。
+var _bg: TextureRect
+var _dim: ColorRect
 
 
 func _ready() -> void:
@@ -18,11 +21,23 @@ func _ready() -> void:
 	UiFont.install(_root, 20)
 	UiTheme.apply(_root)
 
+	# 结算背景大图（2026-09-22，结算背景_通关/失败）：整个铺满、最底层。
+	# 贴图在 show_result 里按胜负选（那时才知道 victory）；这之前保持不可见。
+	_bg = TextureRect.new()
+	_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_bg.visible = false
+	_root.add_child(_bg)
+
+	# 压暗一层：有背景图时只压 0.35 让图透出来；没图时保持原 0.72（纯黑半透罩观感不变）。
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.72)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(dim)
+	_dim = dim
 
 	_title = _make_label(0.0, 220.0, GameStats.VIEW_WIDTH, 70.0, 48)
 	_stats = _make_label(0.0, 320.0, GameStats.VIEW_WIDTH, 160.0, 26)
@@ -54,11 +69,27 @@ func _make_label(x: float, y: float, w: float, h: float, size: int) -> Label:
 	return l
 
 
+## 应用结算背景图：有图 → 显示大图并把压暗罩降到 0.35（图当底、文字压上面，看得清）；
+## 无图（未导入 / 缺美术）→ 保持原「纯黑半透罩 0.72」观感，旧行为逐位不变。
+func _apply_bg(bg_tex: Texture2D) -> void:
+	if _bg == null or _dim == null:
+		return
+	if bg_tex == null:
+		_bg.visible = false
+		_dim.color = Color(0, 0, 0, 0.72)
+		return
+	_bg.texture = bg_tex
+	_bg.visible = true
+	_dim.color = Color(0, 0, 0, 0.35)
+
+
 ## stats 约定字段：victory, waves_completed, kills, level, gold, difficulty（可选）
 ##                 endless / endless_best / new_record（可选，2026-09-20 无尽体验 —— 缺省按普通局渲染）
 func show_result(stats: Dictionary) -> void:
 	var victory: bool = stats.get("victory", false)
 	var endless: bool = stats.get("endless", false)
+	# 结算背景（2026-09-22）：通关用「结算背景_通关」，其余（失败 / 无尽终局）用「结算背景_失败」。
+	_apply_bg(AssetDB.bg("result_win" if victory else "result_lose"))
 	if victory:
 		_title.text = "通关！"
 		_title.add_theme_color_override("font_color", Color("#FFD700"))

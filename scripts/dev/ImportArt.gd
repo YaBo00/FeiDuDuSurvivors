@@ -186,13 +186,20 @@ func _import_ui() -> void:
 
 
 func _import_bg() -> void:
-	# 这三张源文件其实是 JPEG（无 alpha、有损）。
+	# 标题 / 角色选择：源文件其实是 JPEG（无 alpha、有损）。
 	# 若按 PNG 无损重编码，体积会【不降反升】（实测 1143KB → 2375KB）——
-	# 有损源做无损重编码纯粹是白涨体积，恢复不了任何质量。
-	# 所以两张全屏背景改用【有损 WebP】；草地图保持 PNG，因为它是平铺纹理，
-	# 有损压缩会在平铺接缝处产生可见块状伪影。
+	# 有损源做无损重编码纯粹是白涨体积，恢复不了任何质量。所以全屏背景改用【有损 WebP】。
+	#
+	# 2026-09-22 结算 / 商店背景：源文件是【真 PNG】（无损，非 JPEG 冒充）。但它们和
+	# title/charsel 一样是「单张铺满、COVERED 拉伸」的 AI 背景图，不参与平铺 ——
+	# 有损 WebP(q0.92) 能把 1.5~3.2MB 压到原来的十分之一量级而肉眼难辨，与既有全屏
+	# 背景保持一致；反例是 floor_*/grass，那类要 4x4 拼接，有损会在接缝处出块状伪影，
+	# 所以它们才坚持 PNG。判断依据是「是否平铺」，不是源格式。
 	_one("背景/标题画面.png", "bg/title.webp", BG_SIZE.x, BG_SIZE.y, false, "webp")
 	_one("背景/角色选择界面.png", "bg/charsel.webp", BG_SIZE.x, BG_SIZE.y, false, "webp")
+	_one("背景/结算背景_通关.png", "bg/result_win.webp", BG_SIZE.x, BG_SIZE.y, false, "webp")
+	_one("背景/结算背景_失败.png", "bg/result_lose.webp", BG_SIZE.x, BG_SIZE.y, false, "webp")
+	_one("背景/商店背景_夜间杂货铺.png", "bg/shop.webp", BG_SIZE.x, BG_SIZE.y, false, "webp")
 	_one("背景/草地地面.png", "bg/grass.png", GRASS_SIZE.x, GRASS_SIZE.y, false)
 
 

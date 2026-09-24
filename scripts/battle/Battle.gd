@@ -76,11 +76,20 @@ var combat: CombatResolver = null
 ## 副武器系统（2026-09-22）：局内可获得/升级的第二、第三把武器。
 ## 与主角武器独立冷却、独立开火；状态由 Battle 持有 ⇒ 每局 start_run 清空。
 var extra: ExtraWeaponSystem = null
+## 金手指调试面板（2026-09-22）。**刻意声明为无类型 Node**：
+## DebugPanel.gd 反向引用 Battle 类型，这里若再写 DebugPanel 类型就构成双向 class_name
+## 依赖（本工程在 WaveDirector/CombatResolver 上刻意用 Node 句柄规避过同一问题）。
+## 非 null 仅当 GameStats.DEBUG_PANEL_ENABLED 且非自检/探针进程 —— 正常发版恒为 null。
+var debug_panel: Node = null
 
 var state: int = State.FIGHTING
 var wave_num: int = 0
 var wave_timer: float = 0.0
 var kills: int = 0
+## 本局每类敌人的击杀数（2026-09-22 敌人图鉴）：{enemy_type_id: 本局击杀数}。
+## 由 CombatResolver.cleanup_enemies 经 note_enemy_kill() 逐只累加，结算时交给
+## MetaSave.record_kills 入图鉴账本。**自爆的班味炸弹不计**（与 kills 同口径）。
+var enemy_kills: Dictionary = {}
 var waves_completed: int = 0
 var upgrade_taken_count: int = 0
 
@@ -148,13 +157,17 @@ var _hitstop := false
 ## hit-stop 回调的代际计数：重开一局后旧回调作废，不再改 time_scale（A7）
 var _hitstop_gen := 0
 
-## 倍速调节（2026-09-20 用户需求）：战斗内右上角按钮循环 1.0x → 1.5x → 2.0x。
+## 倍速调节（2026-09-20 用户需求）：战斗内右上角按钮循环 1.0x → 1.5x → 2.0x → 4.0x。
+## 4.0x 于 2026-09-22 追加（用户需求）：纯档位扩充，time_scale 语义不变。
+## ⚠️ 4.0x 下引擎单步 delta = 1/60×4 ≈ 0.0667s，玩家弹道单步位移 PROJ_SPEED/15 ≈ 15px
+##    （PROJ_SPEED=225），仍小于「弹半径+敌半径」的判定阈值 ⇒ 不引入穿透漏判；
+##    但敌方弹道（420px/s → 28px/步）接近阈值，命中偶有擦过，方向上偏向玩家有利。
 ## Engine.time_scale 的【用户侧唯一权威】—— hit-stop 恢复、start_run 重置都从这取值；
 ## 实现即引擎全局时标：更新逻辑/动画/物理的 delta 按倍率缩放，暂停/结算不受影响。
 ## 1.0 = 引擎默认值 ⇒ 与旧版本行为【逐位一致】；自检/探针模式不建按钮（门禁基线零变化），
 ## 每局开始重置回 1.0x，返回标题强制还原 1.0（时标只允许在战斗内生效）。
 var speed_mul := 1.0
-const SPEED_STEPS := [1.0, 1.5, 2.0]
+const SPEED_STEPS := [1.0, 1.5, 2.0, 4.0]
 var _speed_btn: Button = null
 ## 中央柔光（让场地中心比四周亮一点，视线自然落在玩家身上）
 var _floor_glow: GradientTexture2D = null
@@ -283,6 +296,7 @@ func _ready() -> void:
 	)
 
 	_build_speed_button()
+	_build_debug_panel()
 
 	if _testing():
 		Engine.time_scale = SELFTEST_TIME_SCALE
@@ -341,6 +355,7 @@ func start_run() -> void:
 	_game_time = 0.0
 	_upgrade_queue.clear()
 	enemy_types_seen.clear()
+	enemy_kills.clear()   # 图鉴：每类击杀数是「本局」口径，重开必须清零
 	taunt_lines_shown = 0
 	get_tree().paused = false
 	# 倍速每局重置回 1.0x（引擎默认值）—— 上一局的 1.5x/2.0x 不允许带进新局
@@ -353,6 +368,7 @@ func start_run() -> void:
 	wave.reset()
 	combat.reset()
 	extra.reset()     # 副武器每局清空（不继承上一局，也不继承 meta）
+	_refresh_hud_extra()   # 同步清空 HUD 副武器栏（否则上一局的图标会留到下一次 HUD 拍）
 	_themes_seen.clear()
 	feedback.reset()
 	_hitstop_gen += 1
@@ -655,6 +671,7 @@ func _tick_fighting(delta: float) -> void:
 	if _hud_timer <= 0.0:
 		_hud_timer = HUD_INTERVAL
 		hud.set_data(player, wave_num, wave_timer, GameStats.WAVE_COUNT)
+		_refresh_hud_extra()   # 副武器图标 + 等级点（Hud 内部指纹去重，没变就不动）
 	# 清场进度条逐帧刷新（2026-09-21）：它是 HUD 里唯一要求帧级实时的元素 ——
 	# 杀一只怪要立刻看到条涨，而 set_data 走的是 HUD_INTERVAL 节拍（会明显滞后一拍）。
 	# 读 WaveDirector 的比值而不是自己算，保证与关内判定 _wave_cleared() 同源。
@@ -707,6 +724,12 @@ func _on_enemy_fired(pos: Vector2, dir: float, dmg: int) -> void:
 ## 自检观测：记录出现过的敌人类型（由 WaveDirector.spawn_enemy 调用）。
 func note_enemy_type(t: String) -> void:
 	enemy_types_seen[t] = true
+
+
+## 记一只敌人的击杀（2026-09-22 敌人图鉴）。**唯一调用点 = CombatResolver.cleanup_enemies**
+## （它也是全局 `kills` 的唯一累加点）—— 两者同源，图鉴的击杀数与战绩面板永远对得上。
+func note_enemy_kill(t: String) -> void:
+	enemy_kills[t] = int(enemy_kills.get(t, 0)) + 1
 
 
 ## 入场台词（2026-09-20 用户需求）：敌人首次进入玩家视野时头顶冒泡，每只一次。
@@ -1015,7 +1038,53 @@ func _generate_options() -> void:
 		o = o.duplicate()
 		o["mastery_progress"] = int(player.weapon_level)
 		pick[i] = o
+	# 金手指注入（隐藏调试面板「强制出现指定升级卡」）：把指定 id 塞进本组选项，取后即清空。
+	# 空串 ⇒ 整段短路，选项集合与随机数消耗逐位不变（面板在自检/门禁进程里根本不实例化）。
+	_apply_forced_upgrade(pick, wslot)
 	_current_options = pick
+
+
+## 调试注入的落地点（唯一消费点，见 GameStats.debug_force_upgrade）。
+## 落槽位 = 最后一个槽，但避开拓副武器卡的槽；已在选项里则不重复塞。
+## 波末路径同样给这张卡挂「敌人代价」，保证卡面与其它卡口径一致（否则玩家看到一张无代价卡
+## 会以为是 bug）。
+func _apply_forced_upgrade(pick: Array, wslot: int) -> void:
+	var forced := String(GameStats.debug_force_upgrade)
+	if forced == "" or pick.is_empty():
+		return
+	GameStats.debug_force_upgrade = ""
+	for o in pick:
+		if String(o.get("id", "")) == forced:
+			return                      # 已在本组选项里（随机正好抽到），无需注入
+	var fdef: Dictionary = {}
+	for d in GameStats.UPGRADE_POOL:
+		if String(d["id"]) == forced:
+			fdef = d
+			break
+	if fdef.is_empty():
+		push_warning("[DebugPanel] 未知升级 id：%s（注入忽略）" % forced)
+		return
+	var fcopy: Dictionary = fdef.duplicate()
+	if _current_reason == "wave":
+		var fcost: Dictionary = _pick_enemy_cost(int(fdef.get("cost_tier", 1)))
+		if not fcost.is_empty():
+			fcopy["cost"] = fcost
+	var slot := pick.size() - 1
+	if slot == wslot and slot > 0:
+		slot -= 1                       # 不覆盖副武器卡槽（它会再走一遍自己的生成逻辑）
+	pick[slot] = fcopy
+
+
+## 副武器栏数据（2026-09-22）：把「持有哪几把 + 各几级」喂给 Hud。
+## 只在 HUD 节拍 / 拿卡瞬间调用；Hud 侧有内容指纹，重复调用零开销。
+func _refresh_hud_extra() -> void:
+	if hud == null or extra == null:
+		return
+	var ids: Array[String] = extra.owned_ids()
+	var levels: Dictionary = {}
+	for id in ids:
+		levels[id] = extra.level_of(id)
+	hud.set_extra_weapons(ids, levels)
 
 
 ## 副武器升级卡（2026-09-22）。
@@ -1029,7 +1098,8 @@ func _generate_options() -> void:
 ## 与普通属性卡的「+N」完全不同，用通用格式化会显示成「+0」。
 func _extra_weapon_cards() -> Array:
 	var out: Array = []
-	var full: bool = extra.owned_count() >= GameStats.MAX_EXTRA_WEAPONS
+	# 上限经 GameStats.extra_weapon_cap() 收口（金手指「解除上限」后出卡规则自动跟着变）。
+	var full: bool = extra.owned_count() >= GameStats.extra_weapon_cap()
 	for id in GameStats.EXTRA_WEAPON_IDS:
 		var wid := String(id)
 		var wname := String(GameStats.EXTRA_WEAPON_DEFS[wid]["name"])
@@ -1158,6 +1228,7 @@ func _on_upgrade_chosen(opt: Dictionary, _index: int) -> void:
 				feedback.spawn_float(player.global_position + Vector2(0.0, -58.0),
 					"获得副武器：%s" % String(GameStats.EXTRA_WEAPON_DEFS[wid]["name"]),
 					Color(1.0, 0.85, 0.35), true)
+				_refresh_hud_extra()   # 立刻点亮 HUD 槽（不等下一拍 0.08s）
 		"level_weapon":
 			var wid2 := String(opt["weapon_id"])
 			if extra.level_up(wid2):
@@ -1165,6 +1236,7 @@ func _on_upgrade_chosen(opt: Dictionary, _index: int) -> void:
 					"%s Lv%d" % [String(GameStats.EXTRA_WEAPON_DEFS[wid2]["name"]),
 						extra.level_of(wid2)],
 					Color(1.0, 0.85, 0.35), true)
+				_refresh_hud_extra()   # 立刻多亮一格等级点
 		_:
 			player.apply_upgrade(opt["id"], GameStats.upgrade_value(opt, wave_num))
 	upgrade_taken_count += 1
@@ -1206,6 +1278,9 @@ func _end_run(victory: bool) -> void:
 		endless_best_before = int(MetaSave.ledger()["best_endless_wave"])
 	if not _testing() and not _probe_process():
 		MetaSave.record_run(victory, waves_completed, kills, player.gold, GameSession.endless)
+		# 敌人图鉴（2026-09-22）：本局每类敌人的击杀数并入图鉴账本（累计 + 解锁）。
+		# 与 record_run 同一个守卫 —— 自检/探针进程同样不写图鉴档（保证门禁不污染玩家存档）。
+		MetaSave.record_kills(enemy_kills)
 	player.set_physics_process(false)
 	# 结算前清场：不然面板盖上来后，背景还站着一群静止的怪
 	_free_all_enemies()
@@ -1568,7 +1643,7 @@ func _build_speed_button() -> void:
 	_speed_btn = b
 
 
-## 点击循环 1.0x → 1.5x → 2.0x → 1.0x，即时生效。
+## 点击循环 1.0x → 1.5x → 2.0x → 4.0x → 1.0x，即时生效。
 func _cycle_speed() -> void:
 	var idx := SPEED_STEPS.find(speed_mul)
 	speed_mul = float(SPEED_STEPS[(idx + 1) % SPEED_STEPS.size()])
@@ -1583,6 +1658,25 @@ func _cycle_speed() -> void:
 func _update_speed_button() -> void:
 	if _speed_btn != null:
 		_speed_btn.text = "%.1fx" % speed_mul
+
+
+## 金手指调试面板的挂接点（2026-09-22）。加挂条件三重：
+##   ① GameStats.DEBUG_PANEL_ENABLED —— 发版开关，改 false 则**根本不实例化**，
+##      连左上角「难度」文字上的隐形热区都不会挂，玩家彻底点不出来；
+##   ② not _testing() —— 自检 / 平衡观测要确定性基线，绝不引入任何额外节点；
+##   ③ not _probe_process() —— 门禁探针（--script）同样零影响 ⇒ 8 分钟门禁基线不动。
+## 用 load() 而不是 preload()：关掉开关后连这个场景资源都不进内存（发版零残留）。
+func _build_debug_panel() -> void:
+	if not GameStats.DEBUG_PANEL_ENABLED or _testing() or _probe_process():
+		return
+	var ps: PackedScene = load("res://scenes/debug/DebugPanel.tscn")
+	if ps == null:
+		push_warning("[Battle] 调试面板场景缺失（res://scenes/debug/DebugPanel.tscn）")
+		return
+	debug_panel = ps.instantiate()
+	add_child(debug_panel)
+	# 动态调用：debug_panel 声明为 Node（见字段注释），静态调用 setup 会编译不过。
+	debug_panel.call("setup", self)
 
 
 ## 本帧实际要绘制的竞技场地面瓦片矩形（行优先）。内部即 GameStats.floor_tile_rects()。

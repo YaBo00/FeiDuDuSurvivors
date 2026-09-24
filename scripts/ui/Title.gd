@@ -32,14 +32,10 @@ func _route_selftest() -> bool:
 
 
 func _build() -> void:
-	# 背景大图（已导入为 1600x900 有损 WebP）
-	var bg := TextureRect.new()
-	bg.texture = AssetDB.bg("title")
-	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(bg)
+	# 背景：三层视差动态背景（2026-09-22 方案 B，见 docs/标题视差背景接入说明_2026-09-22.md）。
+	# 三张贴图缺失 / 未导入时自动回落到原静态背景，保证「没美术也能跑」。
+	if not _build_parallax():
+		_build_static_bg()
 
 	# 压暗一层，保证按钮和文字看得清
 	var dim := ColorRect.new()
@@ -93,7 +89,8 @@ func _build() -> void:
 	start.pressed.connect(_on_start)
 	box.add_child(start)
 
-	# 次级入口并排一行：局外强化（MetaSave 消费端第二片）/ 设置（2026-09-22 设置菜单）
+	# 次级入口并排一行：局外强化（MetaSave 消费端第二片）/ 图鉴（2026-09-22）/ 设置（2026-09-22）
+	# 三个按钮 220 宽 + 2×16 间距 = 692px，在 1280 宽的窗口里仍居中留白充足。
 	var sub_row := HBoxContainer.new()
 	sub_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	sub_row.add_theme_constant_override("separation", 16)
@@ -103,6 +100,13 @@ func _build() -> void:
 	meta_btn.custom_minimum_size = Vector2(220, 48)
 	meta_btn.pressed.connect(_open_meta_shop)
 	sub_row.add_child(meta_btn)
+
+	# 敌人图鉴（2026-09-22，需求《敌人图鉴_给代码AI_2026-09-22.md》）：
+	# 只读展示局外账本里的「击杀过哪些怪 / 各杀了多少」，不消耗任何资源。
+	var codex_btn := _make_button("图鉴", 22)
+	codex_btn.custom_minimum_size = Vector2(220, 48)
+	codex_btn.pressed.connect(_open_codex)
+	sub_row.add_child(codex_btn)
 
 	var settings_btn := _make_button("设置", 22)
 	settings_btn.custom_minimum_size = Vector2(220, 48)
@@ -114,6 +118,164 @@ func _build() -> void:
 	box.add_child(quit)
 
 	start.grab_focus()
+
+
+# ------------------------------------------------- 标题三层视差背景（2026-09-22 方案 B）
+## 天空 / 袋鼠群横向滚动（速度不同），嘉豪 + 草地前景固定并做轻微「呼吸」缩放。
+## 设计文档：docs/标题视差背景接入说明_2026-09-22.md。
+##
+## 落地时对文档给的「示意值」做了三处修正（文档的假设与 Godot 实际语义不同）：
+##   ① motion_mirroring 取【子 Sprite2D 的显示宽度】而非固定的 1920：
+##      Godot 的 ParallaxLayer 是「重复」而非「镜像翻折」—— 官方文档原话
+##      "the texture will not be mirrored, it will simply be repeated"。
+##      源图 3840 = 1920 原图 + 1920 镜像，本身是关于 3840 的周期图元，
+##      故重复周期必须取整幅纹理的显示宽度（3840 × 覆盖缩放）才无缝。
+##   ② 呼吸缩放作用在【FrontLayer 的子 Sprite2D】，不是 FrontLayer 本身：
+##      ParallaxLayer 入树后其 position/scale 每帧被引擎覆盖（官方文档
+##      "changes to this node's position and scale made after it enters the scene
+##      will be ignored"），直接缩放图层无效。
+##   ③ 背景 CanvasLayer 的 layer 设为 -1：ParallaxBackground 是 CanvasLayer，
+##      默认 layer=1 会盖在标题 UI（默认画布 layer 0）之上 ⇒ 必须压到 UI 之下。
+##
+## 缩放：按当前画布做「覆盖式（cover）」，等价静态背景的 KEEP_ASPECT_COVERED ——
+## canvas_items/expand 下画布会随窗口比例变宽变高，覆盖式保证任何比例都铺满不露底。
+var _parallax_root: ParallaxBackground = null
+var _sky_sprite: Sprite2D = null
+var _mid_sprite: Sprite2D = null
+var _front_sprite: Sprite2D = null
+var _sky_layer: ParallaxLayer = null
+var _mid_layer: ParallaxLayer = null
+## 三层配置：[图层名, AssetDB.PARALLAX 键, 滚动速度系数(=文档 motion_scale), 是否横向重复]
+const PARALLAX_LAYERS := [
+	["SkyLayer", "sky", 0.3, true],
+	["MidLayer", "mid", 0.6, true],
+	["FrontLayer", "front", 0.0, false],
+]
+## 单幅画面尺寸：纹理宽 = 它的 2 倍（右半是左半的水平镜像）。源图 3840×1080。
+const PARALLAX_ART := Vector2(1920.0, 1080.0)
+## scroll_offset 递增速度（px/s）：sky 实际 = ×0.3、mid 实际 = ×0.6。文档 §四，可调。
+const PARALLAX_SCROLL_SPEED := 100.0
+## 前景呼吸：周期 4s（与无缝循环节奏一致）、幅度 ±1.5%。文档 §四。
+const PARALLAX_BREATH_PERIOD := 4.0
+const PARALLAX_BREATH_AMPLITUDE := 0.015
+## 当前覆盖缩放（_layout_parallax 算出，呼吸缩放复用）。
+var _parallax_scale := 1.0
+var _breath_t := 0.0
+## 上一次布局用的画布尺寸；_process 里发现变化就重排（首帧尺寸才定下来 / 窗口拉伸）。
+var _last_canvas := Vector2.ZERO
+
+
+## 构建三层视差背景。任一贴图缺失（未导入）返回 false —— 调用方回落静态图。
+func _build_parallax() -> bool:
+	var texs := {
+		"sky": AssetDB.parallax_bg("sky"),
+		"mid": AssetDB.parallax_bg("mid"),
+		"front": AssetDB.parallax_bg("front"),
+	}
+	for k in texs:
+		if texs[k] == null:
+			return false
+
+	var pb := ParallaxBackground.new()
+	pb.name = "TitleParallax"
+	pb.layer = -1        # 见函数头 ③：压到标题 UI 之下
+	add_child(pb)
+	_parallax_root = pb
+
+	for cfg in PARALLAX_LAYERS:
+		var layer := ParallaxLayer.new()
+		layer.name = String(cfg[0])
+		layer.motion_scale = Vector2(float(cfg[2]), 0.0)
+		pb.add_child(layer)
+
+		var spr := Sprite2D.new()
+		spr.name = "Sprite2D"
+		spr.texture = texs[cfg[1]]
+		spr.centered = false
+		if bool(cfg[3]):
+			spr.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+		else:
+			spr.texture_repeat = CanvasItem.TEXTURE_REPEAT_DISABLED
+		layer.add_child(spr)
+
+		match String(cfg[1]):
+			"sky":
+				_sky_layer = layer
+				_sky_sprite = spr
+			"mid":
+				_mid_layer = layer
+				_mid_sprite = spr
+			"front":
+				_front_sprite = spr
+
+	_layout_parallax()
+	return true
+
+
+## 回落：原静态背景大图（1920×1080 有损 WebP，COVERED 铺满）。
+func _build_static_bg() -> void:
+	var bg := TextureRect.new()
+	bg.texture = AssetDB.bg("title")
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(bg)
+
+
+## 按当前画布尺寸重算「覆盖式」缩放、居中位移与无缝重复周期。
+## 画布 = 本 Control 的矩形（canvas_items/expand 下随窗口比例变化）。
+func _layout_parallax() -> void:
+	if _parallax_root == null:
+		return
+	var canvas := size
+	if canvas.x <= 0.0 or canvas.y <= 0.0:
+		return
+	# cover：取较大比例，保证 1920×1080 画面铺满画布（等价 KEEP_ASPECT_COVERED）
+	_parallax_scale = maxf(canvas.x / PARALLAX_ART.x, canvas.y / PARALLAX_ART.y)
+	var s := _parallax_scale
+	var tile := PARALLAX_ART.x * 2.0 * s      # 整幅纹理显示宽 = 无缝重复周期
+	var y_off := (canvas.y - PARALLAX_ART.y * s) * 0.5
+	# sky / mid：x 与重复画布左缘(0)对齐，横向靠 repeat 无限铺满；纵向居中。
+	if _sky_sprite != null:
+		_sky_sprite.scale = Vector2(s, s)
+		_sky_sprite.position = Vector2(0.0, y_off)
+	if _mid_sprite != null:
+		_mid_sprite.scale = Vector2(s, s)
+		_mid_sprite.position = Vector2(0.0, y_off)
+	if _sky_layer != null:
+		_sky_layer.motion_mirroring = Vector2(tile, 0.0)
+	if _mid_layer != null:
+		_mid_layer.motion_mirroring = Vector2(tile, 0.0)
+	_apply_breath()
+	_last_canvas = canvas
+
+
+## 前景「呼吸」：以原图中心为基准做 ±1.5% 缩放（不位移、不穿帮）。
+## 改 Sprite2D 的 scale 并同步补偿 position —— 见函数头 ②（缩放图层本身会被引擎忽略）。
+func _apply_breath() -> void:
+	if _front_sprite == null:
+		return
+	var sc := _parallax_scale * (1.0 + PARALLAX_BREATH_AMPLITUDE \
+		* sin(TAU * _breath_t / PARALLAX_BREATH_PERIOD))
+	_front_sprite.scale = Vector2(sc, sc)
+	# centered=false ⇒ position 是纹理左上角；让「原图中心」恒落在画布中心。
+	_front_sprite.position = Vector2(
+		size.x * 0.5 - PARALLAX_ART.x * 0.5 * sc,
+		size.y * 0.5 - PARALLAX_ART.y * 0.5 * sc)
+
+
+## 驱动滚动 + 呼吸（并在画布尺寸变化时重排）。
+## Godot 的 ParallaxBackground 只在相机移动时产生视差，标题场景相机静止
+## ⇒ 必须手动递增 scroll_offset（文档 §四）。
+func _process(delta: float) -> void:
+	if _parallax_root == null:
+		return
+	if size != _last_canvas:      # 首帧画布尺寸才定下来 / 窗口拉伸
+		_layout_parallax()
+	_parallax_root.scroll_offset.x += PARALLAX_SCROLL_SPEED * delta
+	_breath_t += delta
+	_apply_breath()
 
 
 # ---------------------------------------------------------------- 局外强化商店
@@ -374,6 +536,210 @@ func _close_settings() -> void:
 		_settings_layer = null
 
 
+# ---------------------------------------------------------------- 敌人图鉴（2026-09-22）
+## 图鉴遮罩层（非 null = 开着）。数据全部来自 MetaSave.codex_state()（跨局持久化），
+## 本界面【只读】—— 标题画面杀不了怪，开着的期间数据不可能变，所以状态缓存一次即可。
+var _codex_layer: ColorRect = null
+## 详情区容器（PanelContainer）。点击已解锁格子时整体重建内容。
+var _codex_detail: PanelContainer = null
+## 本次打开时读到的图鉴状态 {id: {"seen": bool, "kills": int}}（13 条只读一次档）。
+var _codex_states: Dictionary = {}
+## 图鉴网格列数：13 只怪 = 4 列 × 4 行，一屏放下，不需要滚动。
+const CODEX_COLUMNS := 4
+## 格子里的图标显示边长（素材画布是 256×256，等比缩到 64 ⇒ 内容高度约 42~64px）。
+const CODEX_ICON_PX := 64
+
+
+func _open_codex() -> void:
+	if _codex_layer != null:
+		return
+	_codex_states = MetaSave.codex_state()
+
+	_codex_layer = ColorRect.new()
+	_codex_layer.color = Color(0, 0, 0, 0.66)
+	_codex_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_codex_layer)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_codex_layer.add_child(center)
+
+	var panel := PanelContainer.new()
+	# 上下内边距单独收紧到 14（默认 22）：图鉴是 4 行网格，是标题页里最高的弹窗，
+	# 省下的 16px 正好把它压在 720 高的窗口内（详见下方布局高度账）。
+	var sb := _panel_stylebox(26.0)
+	sb.content_margin_top = 14.0
+	sb.content_margin_bottom = 14.0
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	# 【高度账】标题 40 + 网格 426 + 详情 112 + 返回 44 + 子项间距 3×8 + 面板内边距 28 ≈ 674px
+	# （窗口 720）。任何一个数字变大都要重新算这笔账，否则「返回」按钮会被屏幕裁掉。
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+
+	var title := Label.new()
+	title.text = "敌人图鉴"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", Color("#FFD700"))
+	box.add_child(title)
+
+	var grid := GridContainer.new()
+	grid.columns = CODEX_COLUMNS
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 6)
+	box.add_child(grid)
+	# 顺序 = GameStats.CODEX_ORDER（= 玩家应该遇到的顺序），界面不硬编码任何敌人 id
+	for id in GameStats.CODEX_ORDER:
+		grid.add_child(_codex_cell(String(id)))
+
+	# 详情区固定高度（未选中时显示操作提示）——不做滚动、不弹二级面板
+	_codex_detail = PanelContainer.new()
+	_codex_detail.custom_minimum_size = Vector2(0, 112)
+	_codex_detail.add_theme_stylebox_override("panel", _codex_detail_stylebox())
+	box.add_child(_codex_detail)
+	_show_codex_detail("")     # 初始态：提示文字
+
+	var back := Button.new()
+	back.text = "返回（Esc）"
+	back.custom_minimum_size = Vector2(220, 44)
+	back.add_theme_font_size_override("font_size", 17)
+	back.pressed.connect(_close_codex)
+	box.add_child(back)
+
+
+## 一个图鉴格子：图标 + 名字 + 击杀数；已解锁可点（看详情），未解锁整格禁用 + 灰显。
+## 用 Button 当卡片底板（自带 hover/pressed/disabled 三态皮肤），内部 VBox 设 IGNORE
+## 让点击穿透到按钮本身。
+func _codex_cell(id: String) -> Control:
+	var st: Dictionary = _codex_states.get(id, {})
+	var seen := bool(st.get("seen", false))
+
+	var btn := Button.new()
+	btn.text = ""
+	btn.custom_minimum_size = Vector2(104, 102)
+	btn.disabled = not seen          # 没见过的格子点不动（需求 §3 只要求已见格子弹详情）
+	if seen:
+		btn.pressed.connect(_show_codex_detail.bind(id))
+
+	var v := VBoxContainer.new()
+	v.set_anchors_preset(Control.PRESET_FULL_RECT)
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_theme_constant_override("separation", 2)
+	btn.add_child(v)
+
+	var icon := TextureRect.new()
+	icon.texture = AssetDB.enemy_sprite(id)
+	icon.custom_minimum_size = Vector2(CODEX_ICON_PX, CODEX_ICON_PX)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if not seen:
+		# 灰色剪影：只调 modulate，不换贴图（需求 §1「不需要新美术」）
+		icon.modulate = Color(0.3, 0.3, 0.3, 1.0)
+	v.add_child(icon)
+
+	var name_lbl := Label.new()
+	name_lbl.text = GameStats.codex_name(id) if seen else "???"
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.add_theme_font_size_override("font_size", 13)
+	name_lbl.add_theme_color_override("font_color",
+		Color(0.92, 0.94, 0.99) if seen else Color(0.55, 0.58, 0.66))
+	v.add_child(name_lbl)
+
+	var kills_lbl := Label.new()
+	if seen:
+		kills_lbl.text = "×%d" % int(st.get("kills", 0))
+	else:
+		kills_lbl.text = ""
+	kills_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	kills_lbl.add_theme_font_size_override("font_size", 12)
+	kills_lbl.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
+	v.add_child(kills_lbl)
+	return btn
+
+
+## 重建详情区。空 id 或未解锁 → 显示操作提示（不会出现「??? 的详情」这种半成品）。
+func _show_codex_detail(id: String) -> void:
+	if _codex_detail == null:
+		return
+	for c in _codex_detail.get_children():
+		_codex_detail.remove_child(c)
+		c.queue_free()
+
+	var st: Dictionary = _codex_states.get(id, {})
+	var seen := id != "" and bool(st.get("seen", false))
+	if not seen:
+		var tip := Label.new()
+		tip.text = "点击已解锁的敌人查看详情"
+		tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		tip.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		tip.add_theme_font_size_override("font_size", 15)
+		tip.add_theme_color_override("font_color", Color(0.58, 0.62, 0.74))
+		_codex_detail.add_child(tip)
+		return
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	_codex_detail.add_child(row)
+
+	var big := TextureRect.new()
+	big.texture = AssetDB.enemy_sprite(id)
+	big.custom_minimum_size = Vector2(88, 88)
+	big.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	big.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	row.add_child(big)
+
+	var info := VBoxContainer.new()
+	info.add_theme_constant_override("separation", 4)
+	info.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(info)
+
+	var name_lbl := Label.new()
+	name_lbl.text = GameStats.codex_name(id)
+	name_lbl.add_theme_font_size_override("font_size", 20)
+	name_lbl.add_theme_color_override("font_color", Color("#FFD700"))
+	info.add_child(name_lbl)
+
+	# 描述必须定宽：Label 在 HBox 里若不限宽会按最长行撑开面板（中文长句尤其明显）
+	var desc := Label.new()
+	desc.text = GameStats.codex_desc(id)
+	desc.custom_minimum_size = Vector2(300, 0)
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.add_theme_font_size_override("font_size", 14)
+	desc.add_theme_color_override("font_color", Color(0.80, 0.84, 0.95))
+	info.add_child(desc)
+
+	var kills_lbl := Label.new()
+	kills_lbl.text = "累计击杀 %d" % int(st.get("kills", 0))
+	kills_lbl.add_theme_font_size_override("font_size", 14)
+	kills_lbl.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
+	info.add_child(kills_lbl)
+
+
+## 详情区内层样式：比主面板再暗一档、无描边的「凹槽」观感（与主面板区分层级）。
+func _codex_detail_stylebox() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.06, 0.07, 0.11, 0.85)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 16.0
+	sb.content_margin_right = 16.0
+	sb.content_margin_top = 12.0
+	sb.content_margin_bottom = 12.0
+	return sb
+
+
+func _close_codex() -> void:
+	if _codex_layer != null:
+		_codex_layer.queue_free()
+		_codex_layer = null
+	_codex_detail = null
+	_codex_states.clear()
+
+
 ## 弹窗面板统一样式（局外强化 / 难度选择 / 设置三处同款：半透明深底 + 描边 + 圆角）。
 func _panel_stylebox(margin: float = 28.0) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
@@ -510,6 +876,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.is_action_pressed("use_item") or (event is InputEventKey and event.pressed \
 				and (event.keycode == KEY_ENTER or event.keycode == KEY_ESCAPE)):
 			_close_meta_shop()
+			get_viewport().set_input_as_handled()
+		return
+	# 图鉴（2026-09-22）：Esc 关闭。不放行 Enter —— 格子全禁用时 Enter 没有别的语义，
+	# 但和商店一致地只认 Esc，避免「按 Enter 顺手把图鉴关掉又开了难度选择」。
+	if _codex_layer != null:
+		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+			_close_codex()
 			get_viewport().set_input_as_handled()
 		return
 	if _diff_layer != null:
