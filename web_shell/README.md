@@ -4,12 +4,16 @@
 
 ## 1. 导出
 
-双击 `tools/export_web.cmd`（或跑下面的命令）：
+双击 `tools/export_web.cmd`（或跑下面的命令），**然后跑 `tools/gen_sw.py` 生成 sw.js**：
 
 ```bat
 Godot_v4.7.2-stable_win64_console.exe --headless --path <项目根> ^
   --export-release "Web (Mobile)" "build/web/index.html"
+python tools\gen_sw.py
 ```
+
+> gen_sw.py 会把 pck/wasm 字节数写进 sw.js 的缓存版本号。**每次重新导出后必须重跑**，
+> 否则玩家浏览器里的 Service Worker 不会感知资源更新。sw.js 与资源文件要一起部署。
 
 导出后 `build/web/` 里会有：
 
@@ -77,6 +81,36 @@ GitHub Pages 无法自定义响应头（除非用 `coi-serviceworker` 之类的 
 Cloudflare Pages 可用 `_headers` 文件配置。**面向手机玩家，建议保持单线程。**
 
 ## 5. 手机操作
+
+### 资源缓存（Service Worker，2026-09-24 起生效）
+
+托管响应头没有 Cache-Control，浏览器对 100MB 级资源的 HTTP 缓存不可靠（移动端驱逐快）。
+现在由 **Service Worker + Cache API** 接管：
+
+- **首次打开**：正常下载（约 100MB），同时写入浏览器持久缓存（Cache API，比 HTTP 缓存稳定得多）；
+- **之后每次打开**：引擎与资源直接从本地缓存读取，**秒开**（实测线上二次加载 49s → 1.6s）；
+- **游戏更新**：重新导出 + 重跑 `tools/gen_sw.py` + 部署后，sw.js 内容变化 → 浏览器自动
+  更新 SW 并清掉旧缓存 → 用户下次打开重新下载新版（预期行为，仅此一次）。
+
+> 缓存版本号指纹 = `index.html + index.pck + index.wasm` 三者字节数。**含 html 是关键**：
+> 只改外壳模板重导出时 pck/wasm 字节不变，若指纹只看它们，玩家会永远拿到旧外壳。
+
+注意：部署完成后有几分钟 CDN 同步窗口，期间部分用户可能短暂拿到旧版页面（重新打开即新）。
+
+### 「开始游戏」按钮与声音解锁（2026-09-24 音频根治）
+
+打开页面后的流程：**自动预载（进度条）→ 出现「▶ 开始游戏」按钮 → 点击进入**。
+
+- **为什么要点按钮**：浏览器规定 AudioContext 只在「用户手势激活期」内创建/恢复才出声。
+  旧版页面加载完自动启动引擎，AudioContext 在无手势时创建（suspended），suspended 期间
+  开播的 BGM 音源在 resume 后**不输出**（引擎 Web 端已知坑）→ 全程无声。
+  新版预载完成后由用户点击启动，引擎 AudioContext 创建即 running，无头探针实测
+  `ctxStates: ["running"]`、BGM 数据 RMS 0.14~0.19（有声）。
+- **预载与启动的衔接**：预载把 wasm/pck 真实下载进 SW 缓存；点击后 `startGame` 内部的
+  下载被 SW cache-first 秒回 → 引擎瞬间启动，赶在手势激活窗口（约 5 秒）内创建音频。
+- **预载失败不挡路**：按钮照常出现，`startGame` 走网络慢路径兜底（只是无预载进度）。
+
+### 触屏
 
 游戏内已内置**左侧浮动虚拟摇杆**（`scripts/ui/TouchControls.gd`）：真机有触摸屏时
 自动显示，手指按在屏幕左半边拖动即可走位。本外壳额外做了：

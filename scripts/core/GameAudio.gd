@@ -2,7 +2,8 @@ class_name GameAudio
 extends Node
 ## 极简音效播放器（对象池）。哪个界面要用，就在那个界面挂一个。
 ##
-## 素材是程序化生成的复古风格短音效（assets/audio/*.wav，合计约 66KB）。
+## 素材是程序化生成的复古风格短音效（assets/audio/*.ogg，合计约 0.26MB；
+## 2026-09-29 瘦身：14 个 wav 全部转码为 OGG Vorbis q4，原 wav 已删）。
 ## 缺某个音效时静默跳过 —— 「没美术也能跑」这条性质在声音上同样成立。
 ##
 ## 【PROCESS_MODE_ALWAYS】商店/升级面板弹出时整棵树被暂停，
@@ -34,9 +35,12 @@ func _ready() -> void:
 ## 播放一个音效。pitch_jitter 给一点随机音高，避免连续播放时的机械感。
 func play(sound: String, volume_db := 0.0, pitch_jitter := 0.05) -> void:
 	if not _streams.has(sound):
-		var path := DIR + sound + ".wav"
+		# 优先 OGG（2026-09-29 瘦身后 wav 已删），回落 .wav 保持「只放一种格式也能跑」
+		var path := DIR + sound + ".ogg"
 		if not ResourceLoader.exists(path):
-			return
+			path = DIR + sound + ".wav"
+			if not ResourceLoader.exists(path):
+				return
 		_streams[sound] = load(path)
 	var stream: AudioStream = _streams[sound]
 	if stream == null:

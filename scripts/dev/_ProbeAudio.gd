@@ -37,16 +37,16 @@ func _process(_delta: float) -> bool:
 func _check_sfx() -> void:
 	print("[PROBE] --- 音效（%d 个） ---" % SFX.size())
 	for name in SFX:
-		var path: String = GameAudio.DIR + name + ".wav"
+		# 2026-09-29 瘦身：SFX 全部转为 OGG（GameAudio 优先 .ogg 回落 .wav）
+		var path: String = GameAudio.DIR + name + ".ogg"
 		var ok := ResourceLoader.exists(path)
 		_check(ok, "存在 %s" % path)
 		if not ok:
 			continue
 		var s: Resource = load(path)
 		_check(s != null and s is AudioStream, "%s 可加载为 AudioStream" % name)
-		if s is AudioStreamWAV:
-			var w := s as AudioStreamWAV
-			_check(w.get_length() > 0.0, "%s 时长 > 0（实际 %.2fs）" % [name, w.get_length()])
+		if s != null:
+			_check(s.get_length() > 0.0, "%s 时长 > 0（实际 %.2fs）" % [name, s.get_length()])
 
 
 func _check_bgm() -> void:

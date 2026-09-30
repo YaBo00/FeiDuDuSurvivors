@@ -65,6 +65,37 @@
 		}
 		#kbd b { color: #cdd6f4; font-weight: 600; }
 		#status.done #kbd { display: none; }
+
+		/* 声音自检按钮：常驻右下角；加载中被 status(20) 覆盖，进游戏后可点 */
+		#sndtest {
+			position: fixed; right: 14px; bottom: 14px; z-index: 15;
+			width: 46px; height: 46px; border-radius: 50%;
+			background: rgba(42, 42, 61, 0.85); border: 1px solid #3d3d55;
+			color: #cdd6f4; font-size: 20px; line-height: 44px; text-align: center;
+			cursor: pointer; user-select: none; -webkit-user-select: none;
+			touch-action: manipulation;
+		}
+		#sndtest:active { background: rgba(91, 140, 255, 0.35); }
+		#sndtoast {
+			position: fixed; right: 14px; bottom: 70px; z-index: 25;
+			display: none; max-width: min(420px, 84vw);
+			background: #1a1a2e; border: 1px solid #5b8cff; border-radius: .5rem;
+			color: #e8e8f0; font-size: 13px; line-height: 1.55;
+			padding: .7rem .9rem; text-align: left;
+		}
+
+		/* 开始按钮：资源预载完成后出现。点击 = 用户手势，引擎在手势激活期内
+		   启动，AudioContext 创建即 running——这是 Web 端无声问题的根治手段。 */
+		#startBtn {
+			display: none; margin-top: 4px;
+			padding: 15px 52px; border-radius: 999px; border: 0;
+			background: linear-gradient(90deg, #5b8cff, #9b6bff);
+			color: #fff; font-size: 18px; font-weight: 700; font-family: inherit;
+			letter-spacing: .1em; cursor: pointer;
+			box-shadow: 0 6px 26px rgba(91, 140, 255, .35);
+			touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+		}
+		#startBtn:active { transform: scale(.96); }
 	</style>
 	$GODOT_HEAD_INCLUDE
 </head>
@@ -73,15 +104,88 @@
 		你的浏览器不支持 HTML5 canvas，请使用较新版本的 Chrome / Safari / Edge。
 	</canvas>
 
+	<div id="sndtest" title="播放声音测试">🔊</div>
+	<div id="sndtoast"></div>
+
 	<div id="status">
 		<div class="brand">$GODOT_PROJECT_NAME</div>
 		<div class="bar"><i id="bar"></i></div>
 		<div class="hint" id="hint">正在加载游戏资源…</div>
 		<div id="notice"></div>
+		<button id="startBtn">▶ 开始游戏</button>
 		<div id="kbd"><b>电脑端操作</b>：WASD / 方向键 移动 · 空格 用道具 · ESC 暂停 · 鼠标点击界面按钮</div>
-		<div class="foot">首次进入需下载约 100 MB 引擎与资源，之后会走浏览器缓存，秒开。手机横屏竖屏都可以玩。</div>
+		<div class="foot">首次进入自动预载引擎与资源，之后走浏览器缓存秒开。手机横竖屏都可以玩。</div>
 	</div>
 
+	<script>
+	// —— Web 音频手势解锁（加固层，2026-09-24）——
+	// 浏览器自动播放策略：AudioContext 在用户首次手势前为 suspended（此时无声）。
+	// Godot 引擎在键盘/鼠标/触摸事件里会自行恢复（display_server_web.cpp），
+	// 这里在最外层再加一道【同步】保险：首个用户手势（capture 阶段、早于引擎处理）
+	// 时直接 resume，兼容 iOS 对「手势同步调用」的严格要求。
+	(function () {
+		var ctxRef = null;
+		var OrigAC = window.AudioContext || window.webkitAudioContext;
+		if (!OrigAC) return;
+		function Patched() {
+			var ctx = new OrigAC(...arguments);
+			ctxRef = ctx;
+			try { if (window.__diag) { window.__diag.ctxObjs.push(ctx); } } catch (e) {}
+			if (ctx.state === 'suspended') {
+				var p = ctx.resume();
+				if (p && p.catch) p.catch(function () {});
+			}
+			return ctx;
+		}
+		Patched.prototype = OrigAC.prototype;
+		window.AudioContext = Patched;
+		if (window.webkitAudioContext) window.webkitAudioContext = Patched;
+		function unlock() {
+			document.removeEventListener('pointerdown', unlock, true);
+			document.removeEventListener('touchstart', unlock, true);
+			document.removeEventListener('keydown', unlock, true);
+			if (ctxRef && ctxRef.state === 'suspended') {
+				var p = ctxRef.resume();
+				if (p && p.catch) p.catch(function () {});
+			}
+		}
+		document.addEventListener('pointerdown', unlock, true);
+		document.addEventListener('touchstart', unlock, true);
+		document.addEventListener('keydown', unlock, true);
+	})();
+
+	// —— 引擎音频图诊断记录（供右下角 🔊 自检读取，2026-09-24）——
+	// 记录：所有 AudioContext（实时状态）、每个 GainNode 的 gain 值采样、
+	// 已 start 的 AudioBufferSource（BGM/音效是否真的开播）。
+	// 只读不改；引用会阻止少量节点回收，游戏会话级可接受。
+	(function () {
+		window.__diag = { ctxObjs: [], starts: 0, firstBuffer: null, gains: [] };
+		var gains = window.__diag.gains;
+		var origConnect = AudioNode.prototype.connect;
+		AudioNode.prototype.connect = function (dest) {
+			try {
+				if (this.constructor.name === 'GainNode' && gains.length < 64) {
+					gains.push(this.gain.value);
+				}
+			} catch (e) {}
+			return origConnect.apply(this, arguments);
+		};
+		var origBSStart = AudioBufferSourceNode.prototype.start;
+		AudioBufferSourceNode.prototype.start = function () {
+			try {
+				window.__diag.starts++;
+				if (!window.__diag.firstBuffer && this.buffer) {
+					window.__diag.firstBuffer = {
+						dur: Number(this.buffer.duration.toFixed(1)),
+						ch: this.buffer.numberOfChannels,
+						sr: this.buffer.sampleRate,
+					};
+				}
+			} catch (e) {}
+			return origBSStart.apply(this, arguments);
+		};
+	})();
+	</script>
 	<script src="$GODOT_URL"></script>
 	<script>
 const GODOT_CONFIG = $GODOT_CONFIG;
@@ -93,6 +197,7 @@ const engine = new Engine(GODOT_CONFIG);
 	const barEl = document.getElementById('bar');
 	const hintEl = document.getElementById('hint');
 	const noticeEl = document.getElementById('notice');
+	const startBtn = document.getElementById('startBtn');
 	const canvas = document.getElementById('canvas');
 
 	function showNotice(text) {
@@ -120,6 +225,13 @@ const engine = new Engine(GODOT_CONFIG);
 		}
 	})();
 
+	// —— Service Worker：把引擎/资源包持久缓存到本地（2026-09-24）——
+	// 托管响应头无 Cache-Control，浏览器对 100MB 级大文件的 HTTP 缓存不可靠
+	// （移动端驱逐快、每次部署 Last-Modified 变化即失效）。改用 Cache API 接管：
+	// 首次访问下载并缓存，之后秒开；游戏更新后 sw.js 构建指纹变化 → 自动换缓存。
+	// 注册时机与启动的配合见下方 launch()（SW 就绪后才拉取 wasm/pck，确保进缓存）。
+	// https 与 localhost 均为安全上下文（SW 的硬性要求）；file:// 本就不支持。
+
 	// 特性检测：缺 WebGL2 等直接给可读提示，而不是白屏。
 	if (typeof Engine.getMissingFeatures === 'function') {
 		let missing = [];
@@ -137,19 +249,204 @@ const engine = new Engine(GODOT_CONFIG);
 
 	// Godot 4.x 官方启动方式：startGame 会自动加载 wasm、预载 pck 并启动。
 	// onProgress 报告的是 wasm+pck 的下载进度（大头）。
-	engine.startGame({
-		'onProgress': function (current, total) {
-			if (current > 0 && total > 0) {
-				setProgress(Math.min(100, Math.round((current / total) * 100)));
+	//
+	// —— 为什么改为「点按钮才启动引擎」（2026-09-24 音频根治）——
+	// 浏览器规定：AudioContext 只有在「用户手势激活期内」创建/恢复才出声。
+	// 旧流程页面加载完自动启动引擎，AudioContext 在无手势时创建（suspended），
+	// suspended 期间开播的 BGM 音源在 resume 后不输出（引擎 Web 端已知坑）
+	// → 全程无声，即使之后点屏幕把 ctx 变 running 也救不回来。
+	// 新流程：打开页面先「预载」（后台把 wasm/pck 真实下载进 SW 缓存，带进度条），
+	// 下载完显示开始按钮；点击 = 新鲜用户手势 → startGame → wasm/pck 被 SW
+	// cache-first 秒回 → 引擎瞬间启动 → AudioContext 在手势激活期内创建即 running。
+	// 预载失败也不挡路：按钮照常出现，startGame 走网络慢路径兜底。
+	function launch() {
+		if (launch._kicked) return;
+		launch._kicked = true;
+		engine.startGame({
+			'onProgress': function (current, total) {
+				if (current > 0 && total > 0) {
+					setProgress(Math.min(100, Math.round((current / total) * 100)));
+				}
+			},
+		}).then(function () {
+			statusEl.classList.add('done');
+			canvas.focus(); // 桌面端免点击直接可键盘操作
+		}, function (err) {
+			showNotice('启动失败：' + (err && err.message ? err.message : err) +
+				'（若是网络中断，刷新页面即可重试）');
+		});
+	}
+
+	// 预载：真实流式下载 wasm+pck（计进度），SW 会顺手把它们写进缓存。
+	// 只预热缓存、不启动引擎——引擎启动（创建音频）必须留给用户点击。
+	var PRELOAD_FILES = ['index.wasm', 'index.pck'];
+	var preStat = {}; // name -> { loaded, total }
+	function reportPreload() {
+		var loaded = 0, total = 0, known = true;
+		for (var i = 0; i < PRELOAD_FILES.length; i++) {
+			var s = preStat[PRELOAD_FILES[i]] || { loaded: 0, total: 0 };
+			loaded += s.loaded; total += s.total;
+			if (!s.total) known = false;
+		}
+		if (known && total > 0) {
+			setProgress(Math.min(99, Math.round((loaded / total) * 100)));
+		} else {
+			hintEl.textContent = '正在预载游戏资源… ' + (loaded / 1048576).toFixed(1) + ' MB';
+		}
+	}
+	function prewarmOne(name) {
+		return fetch(name, { 'cache': 'no-store' }).then(function (resp) {
+			if (!resp.ok) throw new Error(name + ' HTTP ' + resp.status);
+			var total = Number(resp.headers.get('Content-Length')) || 0;
+			preStat[name] = { loaded: 0, total: total };
+			reportPreload();
+			if (!resp.body || !resp.body.getReader) {
+				return resp.arrayBuffer().then(function (buf) {
+					preStat[name].loaded = buf.byteLength; reportPreload();
+				});
 			}
-		},
-	}).then(function () {
-		statusEl.classList.add('done');
-		canvas.focus(); // 桌面端免点击直接可键盘操作
-	}, function (err) {
-		showNotice('启动失败：' + (err && err.message ? err.message : err) +
-			'（若是网络中断，刷新页面即可重试）');
+			var reader = resp.body.getReader();
+			function pump(chunk) {
+				if (chunk.value) { preStat[name].loaded += chunk.value.length; reportPreload(); }
+				if (chunk.done) return null;
+				return reader.read().then(pump);
+			}
+			return reader.read().then(pump);
+		});
+	}
+	function beginPrewarm() {
+		if (beginPrewarm._kicked) return;
+		beginPrewarm._kicked = true;
+		Promise.all(PRELOAD_FILES.map(prewarmOne)).then(function () {
+			setProgress(100);
+			hintEl.textContent = '资源就绪';
+			startBtn.style.display = 'inline-block';
+		}, function () {
+			// 预载失败不挡路：直接出按钮，startGame 内部会自行下载兜底
+			hintEl.textContent = '预载未完成，点击开始将直接加载';
+			startBtn.style.display = 'inline-block';
+		});
+	}
+	startBtn.addEventListener('click', function () {
+		// 用户手势内：顺手恢复引擎已创建的音频上下文（保险层；
+		// 正常情况下引擎的 AudioContext 正是在本次点击内创建，天然有声）
+		try {
+			var d = window.__diag;
+			for (var i = 0; d && i < d.ctxObjs.length; i++) {
+				if (d.ctxObjs[i].state === 'suspended') {
+					var p = d.ctxObjs[i].resume();
+					if (p && p.catch) p.catch(function () {});
+				}
+			}
+		} catch (e) {}
+		startBtn.style.display = 'none';
+		hintEl.textContent = '正在启动引擎…';
+		launch();
 	});
+
+	if ('serviceWorker' in navigator &&
+		(location.protocol === 'https:' || ['127.0.0.1', 'localhost'].indexOf(location.hostname) !== -1)) {
+		// 注册失败自动重试（部署后 CDN 对 sw.js 有分钟级同步窗口，首次可能 404/挂起）
+		var regTries = 0;
+		var tryReg = function () {
+			navigator.serviceWorker.register('sw.js').catch(function () {
+				if (++regTries < 4) { setTimeout(tryReg, 2000 * regTries); }
+			});
+		};
+		tryReg();
+		// 「页面真正被 SW 接管」的标志是 controller 非空（ready 的 resolve 早于
+		// clients.claim() 生效，靠它等会漏掉 wasm/pck 的缓存写入）。接管后再预载，
+		// 5 秒兜底：SW 万一没接管也照常预载（只是预载进不了缓存，不挡路）。
+		var t0 = Date.now();
+		var iv = setInterval(function () {
+			if (navigator.serviceWorker.controller || Date.now() - t0 > 5000) {
+				clearInterval(iv);
+				beginPrewarm();
+			}
+		}, 50);
+	} else {
+		beginPrewarm();
+	}
+
+	// —— 声音自检（2026-09-24）：右下角 🔊 按钮用 WebAudio 直接播一声哔 ——
+	// 与游戏引擎完全无关，用于分流「浏览器→扬声器链路」与「引擎音频」哪段断了：
+	// 听得到哔 = 浏览器侧正常（问题在引擎侧）；听不到 = 系统/设备侧问题。
+	(function () {
+		var btn = document.getElementById('sndtest');
+		var toast = document.getElementById('sndtoast');
+		function show(text) {
+			toast.style.display = 'block';
+			toast.textContent = text;
+			clearTimeout(show._t);
+			show._t = setTimeout(function () { toast.style.display = 'none'; }, 9000);
+		}
+		if (!btn) return;
+		btn.addEventListener('click', function () {
+			var AC = window.AudioContext || window.webkitAudioContext;
+			if (!AC) { show('此浏览器不支持 Web Audio，无法测试。'); return; }
+
+			// 先顺手恢复 Godot 引擎自己的音频上下文（用户手势内，浏览器必然放行）
+			var d = window.__diag || null;
+			var godotStates = [];
+			if (d) {
+				for (var ci = 0; ci < d.ctxObjs.length; ci++) {
+					godotStates.push(d.ctxObjs[ci].state);
+					if (d.ctxObjs[ci].state === 'suspended') {
+						try { d.ctxObjs[ci].resume(); } catch (e) {}
+					}
+				}
+			}
+
+			var ctx;
+			try { ctx = new AC(); } catch (e) { show('创建 AudioContext 失败：' + e); return; }
+			var finish = function () { setTimeout(function () { try { ctx.close(); } catch (e) {} }, 400); };
+			var play = function () {
+				try {
+					var o = ctx.createOscillator();
+					var g = ctx.createGain();
+					o.type = 'sine';
+					o.frequency.setValueAtTime(660, ctx.currentTime);
+					o.frequency.setValueAtTime(880, ctx.currentTime + 0.35);
+					g.gain.setValueAtTime(0.0001, ctx.currentTime);
+					g.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 0.03);
+					g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
+					o.connect(g); g.connect(ctx.destination);
+					o.start(); o.stop(ctx.currentTime + 0.85);
+
+					// —— 引擎音频诊断摘要 ——
+					var diagText = '';
+					if (d) {
+						var zeroG = 0, minG = 1;
+						for (var i = 0; i < d.gains.length; i++) {
+							if (d.gains[i] < minG) { minG = d.gains[i]; }
+							if (d.gains[i] <= 0.001) { zeroG++; }
+						}
+						var ctxStr = godotStates.join('/') || '未创建';
+						diagText = '【引擎诊断】音频上下文:' + ctxStr +
+							'｜增益节点:' + d.gains.length + '个(最小' + minG.toFixed(2) +
+							(zeroG > 0 ? '，有' + zeroG + '个为0!' : '，无0值') + ')' +
+							'｜已开播音源:' + d.starts + '个' +
+							(d.firstBuffer ? '(BGM ' + d.firstBuffer.dur + 's/' + d.firstBuffer.ch + 'ch)' : '(无)');
+					}
+					show('🔊 已播放测试音（约 1 秒）。' +
+						'能听到 → 浏览器→扬声器链路正常；听不到 → 检查 Windows 音量合成器/输出设备。' +
+						' 把本提示截图发给 Buddy。 ' + diagText);
+					finish();
+				} catch (e) {
+					show('播放测试音失败：' + e);
+					finish();
+				}
+			};
+			if (ctx.state === 'suspended') {
+				ctx.resume().then(play, function (e) {
+					show('AudioContext 被浏览器拒绝恢复：' + e + '（多点一次按钮通常可解锁）');
+					finish();
+				});
+			} else {
+				play();
+			}
+		});
+	})();
 }());
 	</script>
 </body>
