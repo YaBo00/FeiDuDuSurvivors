@@ -357,7 +357,7 @@ func _build_panel() -> void:
 	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.35))
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(title)
-	var close_btn := _button(head, "✕ 关闭", _close_panel)
+	var close_btn := _button(head, "× 关闭", _close_panel)
 	close_btn.custom_minimum_size = Vector2(70.0, 26.0)
 
 	var tabs := TabContainer.new()

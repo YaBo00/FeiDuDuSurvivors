@@ -32,8 +32,15 @@ func _ready() -> void:
 		_players.append(p)
 
 
-## 播放一个音效。pitch_jitter 给一点随机音高，避免连续播放时的机械感。
-func play(sound: String, volume_db := 0.0, pitch_jitter := 0.05) -> void:
+## 播放一个音效。pitch_jitter 给一点随机音高（避免连续播放时的机械感）；
+## pitch_scale 是确定的音高倍率（1.0 = 原调；<1 低沉、>1 尖亮）—— 两者相乘生效。
+##
+## 【2026-10-08 语义修正】旧版只有 pitch_jitter 一个参数，但多处调用方按「音高倍率」在
+## 第三参填了 0.55~1.3 的大值（如 Coin 1.3 = 高音叮当）—— 实际被当成 ±130% 的随机抖动，
+## 同一个音每次播出的音高从半频乱跳到双频，且极值处 pitch_scale 可落到 0 附近（发闷）。
+## 现拆成「抖动（小值） + 音高（倍率）」两个参数：旧三参调用精确等价于过去的行为
+## （jitter 值不变、pitch 恒 1.0），需要定调高的调用方显式传第四参。
+func play(sound: String, volume_db := 0.0, pitch_jitter := 0.05, pitch_scale := 1.0) -> void:
 	if not _streams.has(sound):
 		# 优先 OGG（2026-09-29 瘦身后 wav 已删），回落 .wav 保持「只放一种格式也能跑」
 		var path := DIR + sound + ".ogg"
@@ -49,7 +56,7 @@ func play(sound: String, volume_db := 0.0, pitch_jitter := 0.05) -> void:
 		if not p.playing:
 			p.stream = stream
 			p.volume_db = volume_db
-			p.pitch_scale = 1.0 + randf_range(-pitch_jitter, pitch_jitter)
+			p.pitch_scale = pitch_scale * (1.0 + randf_range(-pitch_jitter, pitch_jitter))
 			p.play()
 			return
 

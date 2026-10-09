@@ -25,6 +25,11 @@ signal shake_requested()
 signal hitstop_requested()
 ## 玩家死亡（由接触伤害或敌方弹道触发）→ Battle 走失败结算
 signal player_died()
+## Boss 宝箱被拾取（2026-10-08 玩法增补批次）。本模块不做面板 —— Battle 听到后
+## 记账（_chest_pending）并按现场决定「立即开面板」还是「留给波末链」。
+signal chest_collected()
+## 宝箱怪现形（2026-10-08 局内事件系统）：拾取假宝箱 → Battle 在原位刷一只 Mimic 敌人。
+signal mimic_revealed(pos: Vector2)
 
 ## 空间网格：cell -> 敌人引用数组。分离力与弹道碰撞共用（P0-1 / P1-20）。
 var _grid: Dictionary = {}
@@ -236,12 +241,20 @@ func process_projectiles(delta: float) -> void:
 						e.global_position)
 				proj.pierced += 1
 				hits[e.get_instance_id()] = true
+				# 【武器融合·落笔惊雷 / 寒心冰封】直接命中钩子（2026-10-08 第二梯队）：
+				# 只挂在【直接命中】上（溅射不触发）—— 落笔惊雷按 25% 劈雷、
+				# 寒心冰封施加 3 秒减速。未融合角色零随机消耗。
+				_b.extra.fusion_on_hit(e)
 				# 【爆裂薯块】命中溅射（potato 第二形态）：以命中点为圆心，对 aoe_radius
 				# 内【其他】敌人结算 直接伤害 × aoe_pct。
 				# 溅射不吃暴击/吸血/金币镖、不消耗 pierce；目标记入本弹已命中集合 ——
 				# 慢速大弹在重叠区停留多帧也不会对同一目标重复溅射（与穿透去重同表）。
 				# GRID_CELL=96 ≥ 最大溅射半径 90，nearby_enemies 的 3x3 查询保证全覆盖。
 				if proj.aoe_radius > 0.0 and proj.aoe_pct > 0.0:
+					# 【武器融合·剧毒薯泥】溅射命中点留毒池（2026-10-08 第二梯队）：
+					# 每次命中（有溅射能力的武器）判定一次 35% —— 不看圈内是否真的溅到别人：
+					# 「薯泥砸在地上」就该留一片，哪怕旁边没怪（区域封锁也有用）。
+					_b.extra.fusion_on_splash(e.global_position)
 					# 溅射基数用【实扣伤害 dmg】（已含中毒易伤），与直接命中同口径
 					var splash := maxi(1, roundi(float(dmg) * proj.aoe_pct))
 					for oe in nearby_enemies(e.global_position):
@@ -320,7 +333,9 @@ func on_player_fired(aim_pos: Vector2, count: int) -> void:
 	# _b 是无类型 Node → 属性访问返回 Variant，必须显式标注（Variant 推断坑）
 	var player_pos: Vector2 = _b.player.global_position
 	var base_ang: float = (aim_pos - player_pos).angle()
-	var wid: String = String(_b.player.char_id)
+	# 武器线唯一读取口（2026-10-09 meta 2.0 第二批）：weapon_id() = 武器自由覆盖值
+	# 或角色本命武器。弹道形态 / 贴图 / 颜色全部跟随它（未覆盖时 == char_id，逐位不变）。
+	var wid: String = _b.player.weapon_id()
 	var w: Dictionary = GameStats.weapon_for_char(wid)
 	# 出膛伤害 = atk × 武器 dmg_mul × 全局乘区 × 特性乘区（背水一战）× 武器进化乘区（B2 迭代）。
 	# damage_bonus() 夹在暴击判定【之前】，见设计文档 §0.3。
@@ -386,6 +401,10 @@ func on_player_fired(aim_pos: Vector2, count: int) -> void:
 		if visual.is_empty():
 			proj.body_color = GameStats.weapon_color(wid)
 		_b.projectiles.append(proj)
+	# 【武器融合·环刃连奏 / 旋风连拳】开火钩子（2026-10-08 第二梯队）：
+	# 放在弹道生成循环之外 —— 一次开火只触发一次（甩刃与主武器弹道同帧起飞）。
+	# 未融合角色这里只是一次字符串比较，零随机消耗（自检流不漂）。
+	_b.extra.fusion_on_fired(aim_pos)
 
 
 ## 清理死亡敌人：计击杀、按 harvest/gold_per_kill 掉金币与经验、爆裂、暴击 hit-stop。
@@ -400,29 +419,46 @@ func cleanup_enemies() -> void:
 				_b.kills += 1
 				# 图鉴（2026-09-22）：与 kills 同一个门槛累加每类击杀数（自爆同样不算）。
 				_b.note_enemy_kill(String(e.type_name))
-			# 精英金币 ×ELITE_GOLD_MUL（2026-09-22 词缀系统，需求 §2.4「在现有 4 金基础上 ×3」）。
-			# 乘区放在 harvest 之前：收益/存钱罐等既有加成照常作用在这份更高的基础面额上。
-			var gmul: float = GameStats.ELITE_GOLD_MUL if e.type_name == "Elite" else 1.0
-			var gv: int = roundi(float(e.gold) * gmul * float(_b.player.harvest)) \
-				+ int(_b.player.gold_per_kill)
-			spawn_pickup(Pickup.KIND_GOLD, gv, e.global_position)
-			# 幸运（2026-09-20 扩充）：把死属性接入掉落 —— 按 luck 概率【额外】掉一枚同面额金币。
-			# luck 由「幸运」升级卡提供（10/15/20%）；探针可用 luck=1.0 做确定性断言。
-			if _b.player.luck > 0.0 and randf() < _b.player.luck:
-				spawn_pickup(Pickup.KIND_GOLD, gv,
-					e.global_position + Vector2(randf_range(-12, 12), randf_range(-12, 12)))
-			spawn_pickup(Pickup.KIND_XP, e.xp_value,
-				e.global_position + Vector2(randf_range(-10, 10), randf_range(-10, 10)))
-			# 磁铁掉落（C3 掉落三件套）：精英/Boss 必掉，普通怪小概率 —— 拾取后 8 秒全场磁吸
-			if e.type_name == "Elite" or e.type_name == "Boss" \
-					or randf() < GameStats.MAGNET_DROP_CHANCE:
-				spawn_pickup(Pickup.KIND_MAGNET, 0,
-					e.global_position + Vector2(randf_range(-14, 14), randf_range(-14, 14)))
-			# 商店券（2026-09-22 词缀系统，需求 §2.4）：精英【必掉】，拾取后下一家商店 8 折。
-			# 与磁铁同一次落点抖动，但独立判定 —— 精英身上会同时掉两件，是刻意的「精英奖励感」。
-			if e.type_name == "Elite":
-				spawn_pickup(Pickup.KIND_COUPON, 0,
-					e.global_position + Vector2(randf_range(-16, 16), randf_range(-16, 16)))
+				# 【武器融合·钞能导弹】击杀钩子（2026-10-08 第二梯队）：
+				# 与击杀计数同门槛 —— 自爆不算击杀、也不喷导弹；核弹（no_drop）击杀照常
+				# 触发（导弹是战斗力外溢，不是掉落收益，与掉落的压制口径无关）。
+				_b.extra.fusion_on_kill(e.global_position)
+			# 核弹击杀压制掉落（2026-10-08 主动道具）：no_drop = true 时整段截断 ——
+			# 金/幸运加金/经验/磁铁/Boss 宝箱/商店券全部不给（「全屏秒杀」不能变成「全屏发财」）。
+			# 击杀计数、死亡爆裂、击杀台词在段外，照常执行。
+			if not e.no_drop:
+				# 精英金币 ×ELITE_GOLD_MUL（2026-09-22 词缀系统，需求 §2.4「在现有 4 金基础上 ×3」）。
+				# 乘区放在 harvest 之前：收益/存钱罐等既有加成照常作用在这份更高的基础面额上。
+				var gmul: float = GameStats.ELITE_GOLD_MUL if e.type_name == "Elite" else 1.0
+				var gv: int = roundi(float(e.gold) * gmul * float(_b.player.harvest)) \
+					+ int(_b.player.gold_per_kill)
+				spawn_pickup(Pickup.KIND_GOLD, gv, e.global_position)
+				# 幸运（2026-09-20 扩充）：把死属性接入掉落 —— 按 luck 概率【额外】掉一枚同面额金币。
+				# luck 由「幸运」升级卡提供（10/15/20%）；探针可用 luck=1.0 做确定性断言。
+				if _b.player.luck > 0.0 and randf() < _b.player.luck:
+					spawn_pickup(Pickup.KIND_GOLD, gv,
+						e.global_position + Vector2(randf_range(-12, 12), randf_range(-12, 12)))
+				spawn_pickup(Pickup.KIND_XP, e.xp_value,
+					e.global_position + Vector2(randf_range(-10, 10), randf_range(-10, 10)))
+				# 磁铁掉落（C3 掉落三件套）：精英/Boss 必掉，普通怪小概率 —— 拾取后 8 秒全场磁吸
+				# ⚠️ Boss 判定用 behavior == "boss"（2026-10-08）：旧的 name 白名单只写了 "Boss"，
+				# BossPUA（波 10）不在名单里、只能吃 1% 概率 —— 与「Boss 必掉磁铁」的设计语义不符。
+				if e.type_name == "Elite" or e.behavior == "boss" \
+						or randf() < GameStats.MAGNET_DROP_CHANCE:
+					spawn_pickup(Pickup.KIND_MAGNET, 0,
+						e.global_position + Vector2(randf_range(-14, 14), randf_range(-14, 14)))
+				# Boss 宝箱（2026-10-08 玩法增补批次）：Boss 必掉一只宝箱 —— 波 10/20 的
+				# 高潮击杀有专属回报（旧版 Boss 只比普通怪多一枚磁铁）。拾取后三选一奖励。
+				# 宝箱怪（2026-10-08 事件系统）同样必掉：打死「假宝箱」才解锁「真宝箱」——
+				# 兑现 codex_desc 里「打死才给开箱」的承诺。
+				if e.behavior == "boss" or e.type_name == "Mimic":
+					spawn_pickup(Pickup.KIND_CHEST, 0,
+						e.global_position + Vector2(randf_range(-8, 8), randf_range(-8, 8)))
+				# 商店券（2026-09-22 词缀系统，需求 §2.4）：精英【必掉】，拾取后下一家商店 8 折。
+				# 与磁铁同一次落点抖动，但独立判定 —— 精英身上会同时掉两件，是刻意的「精英奖励感」。
+				if e.type_name == "Elite":
+					spawn_pickup(Pickup.KIND_COUPON, 0,
+						e.global_position + Vector2(randf_range(-16, 16), randf_range(-16, 16)))
 			# 死亡爆裂：精英/大怪更大更亮；暴击收掉的最后一下给个短暂 hit-stop
 			burst_requested.emit(e.global_position, e.body_color, e.type_name != "Slime")
 			sfx_requested.emit("kill", -6.0, 1.0)
@@ -465,6 +501,14 @@ func collect(pk: Pickup) -> void:
 		_float(_b.player.global_position + Vector2(0, -34.0),
 			"商店券! 下一家商店 8 折", Color(1.0, 0.85, 0.35), true)
 		sfx_requested.emit("coin", -6.0, 1.2)
+	elif pk.kind == Pickup.KIND_CHEST:
+		# Boss 宝箱（2026-10-08）：开面板与否由 Battle 按现场决定（见 chest_collected 注释）。
+		# 本模块只负责「被拾取」这件事本身。
+		chest_collected.emit()
+	# 宝箱怪现形（2026-10-08 局内事件系统）：拾取「假宝箱」→ 在原位刷一只 Mimic 敌人。
+	# 与宝箱一样由 Battle 按现场决定后续（这里只报「被开了」这件事）。
+	elif pk.kind == Pickup.KIND_MIMIC:
+		mimic_revealed.emit(pk.global_position)
 	else:
 		_b.player.gain_xp(pk.value)
 		sfx_requested.emit("xp", -12.0, 1.0)
@@ -472,8 +516,14 @@ func collect(pk: Pickup) -> void:
 
 
 ## 回收场上全部掉落物（波末调用）。与 process_pickups 里的结算逻辑保持一致。
+## ⚠️ 宝箱怪例外（2026-10-08）：【不】走真空回收 —— 它的语义是「踩到才咬人」，
+## 波末无痕收走（此时 end_wave 已在执行，现形刷怪会破坏「清场即过关」的时序）。
+## 未踩的陷阱平静消失，与「没捡到的金币」同级处理。
 func collect_all_pickups() -> void:
 	for pk in _b.pickups:
+		if is_instance_valid(pk) and pk.kind == Pickup.KIND_MIMIC:
+			pk.queue_free()
+			continue
 		collect(pk)
 	_b.pickups.clear()
 
@@ -585,7 +635,9 @@ func process_pickups(delta: float) -> void:
 		# 拾取范围是【玩家属性】（基准很小，可被升级提升），不是固定常量。
 		# 之前用固定 150px，玩家还没走到就隔着老远自动吸走了。
 		# 全场磁吸期间：距离判定直接放行（再远的掉落物也吸）。
-		if magnet_all or d < _b.player.pickup_range:
+		# 地图机制「回音定位」（2026-10-09 第二梯队·多地图）：消费点乘 player.map_mul("pickup")
+		# —— 空快照（selftest / 探针 / 非云石回廊）= 1.0；全场磁吸分支与它无关（本来就放行）。
+		if magnet_all or d < _b.player.pickup_range * _b.player.map_mul("pickup"):
 			pk.magnetized = true
 			pk.magnet_speed = 120.0
 			remaining.append(pk)

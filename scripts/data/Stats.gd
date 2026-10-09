@@ -147,31 +147,76 @@ const FLOOR_GRADE_TARGET_LUM := 0.38
 ## 每 4 波换一种地面材质；20 波正好 5 种，越往后越「贵」。
 ## 2026-09-19 背景重构：地面从「程序化渐变 + 花纹」换成**真实贴图**
 ## （assets/bg/{id}.png，2048×2048 方图，按格子比例居中裁切后 3×3 拼接）。
-## 主题表字段：
+## 主题表字段（2026-10-09 第二梯队·多地图扩展：纯视觉主题升级为「地图」）：
 ##   id      主题键（同时是贴图键：AssetDB.floor_bg(id) → bg/{id}.png）
 ##   name    波次横幅显示名
 ##   border  竞技场边框颜色（跟主题走，一眼能看出换关了）
 ##   grade   地面整体调色（draw 的 modulate）：把主题平均亮度【归一】到同一档
 ##   veil    柔化纱颜色（含 alpha）：向主题【自身平均色】混合 ⇒ 只压对比、不动色调
+##   layout  地图布局（障碍物规格）：换图时由 WaveDirector.spawn_obstacles 读取重建。
+##           {"mode": "random", "count", "min": Vector2, "max": Vector2} 或
+##           {"mode": "corners", "size": Vector2}（四角对称柱，零随机固定坐标）
+##   effect  环境机制（纯乘区/增量，键见 map_enemy_mul 与 Player.map_effects 消费点）
+##   effect_name / effect_desc  机制短名与描述（横幅 / 中央通知 / 构筑一览显示用）
 ## grade / veil 的来历与算法见上方「地面压场」段落的实测表，不要凭手感改。
+## ⚠️ 多地图纪律：机制全部走【已有数据入口】（Player 移速/拾取/金币、Enemy 移速），
+##    消费点零分支；布局重建只在换图瞬间（波末清场后）发生 —— 见 WaveDirector。
 const WAVES_PER_THEME := 4
 
 const FLOOR_THEMES := [
 	{"id": "ceramic", "name": "陶瓷大厅", "border": Color(0.62, 0.70, 0.82, 0.55),
-		"grade": Color(0.660, 0.660, 0.660), "veil": Color(0.160, 0.260, 0.320, 0.28)},
+		"grade": Color(0.660, 0.660, 0.660), "veil": Color(0.160, 0.260, 0.320, 0.28),
+		# 教学期基准图：布局 = 现状默认参数（逐位），无环境机制
+		"layout": {"mode": "random", "count": 2, "min": Vector2(72.0, 72.0), "max": Vector2(150.0, 150.0)},
+		"effect": {}, "effect_name": "", "effect_desc": ""},
 	{"id": "wood", "name": "木造工坊", "border": Color(0.72, 0.52, 0.32, 0.55),
-		"grade": Color(0.787, 0.787, 0.787), "veil": Color(0.752, 0.432, 0.190, 0.35)},
+		"grade": Color(0.787, 0.787, 0.787), "veil": Color(0.752, 0.432, 0.190, 0.35),
+		# 密集小障碍 + 「车间疾走」：木地板轻快，玩家移速 +10%
+		"layout": {"mode": "random", "count": 4, "min": Vector2(56.0, 56.0), "max": Vector2(96.0, 96.0)},
+		"effect": {"speed": 0.10}, "effect_name": "车间疾走", "effect_desc": "移速 +10%"},
 	{"id": "marble", "name": "云石回廊", "border": Color(0.72, 0.82, 0.94, 0.55),
-		"grade": Color(0.461, 0.461, 0.461), "veil": Color(0.823, 0.825, 0.833, 0.28)},
+		"grade": Color(0.461, 0.461, 0.461), "veil": Color(0.823, 0.825, 0.833, 0.28),
+		# 四角对称柱廊（零随机固定坐标）+ 「回音定位」：柱间回音帮你吸东西，拾取范围 +35%
+		"layout": {"mode": "corners", "size": Vector2(110.0, 110.0)},
+		"effect": {"pickup": 0.35}, "effect_name": "回音定位", "effect_desc": "拾取范围 +35%"},
 	{"id": "metal", "name": "钢铁车间", "border": Color(0.58, 0.68, 0.76, 0.55),
-		"grade": Color(0.640, 0.640, 0.640), "veil": Color(0.575, 0.597, 0.616, 0.45)},
+		"grade": Color(0.640, 0.640, 0.640), "veil": Color(0.575, 0.597, 0.616, 0.45),
+		# 重型大障碍 + 「钢梁重压」：铁梁压得敌人跑不快，敌人移速 -10%
+		"layout": {"mode": "random", "count": 2, "min": Vector2(130.0, 130.0), "max": Vector2(190.0, 190.0)},
+		"effect": {"espd": -0.10}, "effect_name": "钢梁重压", "effect_desc": "敌人移速 -10%"},
 	{"id": "gilded", "name": "鎏金王座", "border": Color(1.0, 0.84, 0.42, 0.60),
-		"grade": Color(1.00, 1.00, 1.00), "veil": Color(0.403, 0.244, 0.101, 0.45)},
+		"grade": Color(1.00, 1.00, 1.00), "veil": Color(0.403, 0.244, 0.101, 0.45),
+		# 决战前开阔图（单障碍）+ 「遍地鎏金」：金币收益 +25%（决战前购物资本）
+		"layout": {"mode": "random", "count": 1, "min": Vector2(120.0, 120.0), "max": Vector2(180.0, 180.0)},
+		"effect": {"gold": 0.25}, "effect_name": "遍地鎏金", "effect_desc": "金币收益 +25%"},
 ]
 
 ## 主题数据缺失时的兜底（例如探针只挂了贴图没挂主题）：不调色、不加纱。
 const FLOOR_GRADE_DEFAULT := Color(1.0, 1.0, 1.0)
 const FLOOR_VEIL_DEFAULT := Color(0.0, 0.0, 0.0, 0.0)
+
+# ---- 多地图系统（2026-10-09 第二梯队）----
+# 「纯视觉主题」升级为「地图 = 视觉 + 布局 + 环境机制」三合一，节拍沿用 WAVES_PER_THEME
+# （每 4 波一换；20 波 = 5 张图正好打完，视觉与玩法同步切换）。
+#
+# 两个通道（消费点零分支）：
+#   · Player 侧快照：Battle 换图时把 effect 字典写入 player.map_effects，消费点
+#     （移速 / 拾取 / 金币）乘 1.0 + effect[key]；空字典 = 全 1.0（旧行为逐位）。
+#   · Enemy 侧纯函数：map_enemy_mul(wave, key) 按波次查表（Enemy 不持 Battle 引用，
+#     与 endless_rule_mul 同模式）；波 1-4 恒 1.0。
+#
+# 测试基线：map_enabled = false 时布满布局回退默认参数、机制与换图重建整体禁用。
+# ⚠️ 与 boss_phase / endless_rules 不同：探针进程【也】关闭（--script 模式）——
+#    障碍重建会消耗随机流（改布局 = 额外的 randf 调用序列），比纯乘区系统的
+#    污染面大，故默认不信任探针；新探针 _ProbeMaps 手动置 true 构造世界。
+static var map_enabled := true
+
+## 布局回退默认（== 升级前 Obstacle 常量，逐位一致）：map_enabled = false 或
+## 表数据缺失时使用 —— selftest / 探针 / 正常游玩波 1-4 的随机流全部不变。
+const MAP_DEFAULT_LAYOUT := {"mode": "random", "count": OBSTACLE_COUNT,
+	"min": OBSTACLE_MIN_SIZE, "max": OBSTACLE_MAX_SIZE}
+## corners 布局的角柱锚点：从竞技场两角各向内收这么多世界像素（对称柱廊）。
+const MAP_CORNER_OFFSET := 520.0
 
 
 ## 本波该用哪种地面主题。波 1..20 与旧 clampi 结果【逐位一致】（idx 0..4）；
@@ -179,6 +224,41 @@ const FLOOR_VEIL_DEFAULT := Color(0.0, 0.0, 0.0, 0.0)
 static func floor_theme_for_wave(wave_num: int) -> Dictionary:
 	var idx := int((maxi(1, wave_num) - 1) / WAVES_PER_THEME) % FLOOR_THEMES.size()
 	return FLOOR_THEMES[idx]
+
+
+## 本波地图的布局规格。map_enabled = false 或表缺失 → 默认参数（旧行为）。
+static func map_layout_for_wave(wave_num: int) -> Dictionary:
+	if not map_enabled:
+		return MAP_DEFAULT_LAYOUT
+	var t := floor_theme_for_wave(wave_num)
+	if t.has("layout"):
+		return t["layout"]
+	return MAP_DEFAULT_LAYOUT
+
+
+## 本波地图的机制短名（无机制 / 关闭 → 空串，横幅与通知不拼）。
+static func map_effect_name_for_wave(wave_num: int) -> String:
+	if not map_enabled:
+		return ""
+	return String(floor_theme_for_wave(wave_num).get("effect_name", ""))
+
+
+## 本波地图的机制描述（构筑一览显示用；无机制 → 空串）。
+static func map_effect_desc_for_wave(wave_num: int) -> String:
+	if not map_enabled:
+		return ""
+	return String(floor_theme_for_wave(wave_num).get("effect_desc", ""))
+
+
+## 敌人侧的环境机制乘区（Enemy.setup 按波次查表）：返回 1.0 + effect[key]。
+## 未登记 / 关闭 / 波 1-4（陶瓷大厅无机制）→ 恒 1.0（旧行为逐位）。
+static func map_enemy_mul(wave_num: int, key: String) -> float:
+	if not map_enabled:
+		return 1.0
+	var eff: Dictionary = floor_theme_for_wave(wave_num).get("effect", {})
+	if not eff.has(key):
+		return 1.0
+	return 1.0 + float(eff[key])
 
 
 # ---- 地面瓦片拼接（2026-09-19 背景重构二调；同日三调：素材换成 2048² 方图）----
@@ -261,14 +341,19 @@ static func floor_tile_src_rect(tex_size: Vector2, cols: int = FLOOR_TILE_COLS,
 ##   xp_mul         升级所需经验倍率（乘法，0.8 = 经验需求降 20%）
 ##   all            全属性百分比（Player.recalc_stats 的全局乘区）
 ##
-## ⚠️ sadness_aura（减速光环）与 lucky_charm（幸运）的玩法还没实现，暂不上架 ——
-##    图标已就位，等机制做了再进池子。
+## 2026-10-08：sadness_aura（忧郁光环）与 lucky_charm（幸运护符）已补齐机制、正式上架
+## （效果键 slow_aura / rarity_luck —— 之前「图标已就位但机制未做」的注释到此作废）。
 const RARITY_PRICE := {
 	"common": 18, "uncommon": 32, "rare": 50, "epic": 75, "legendary": 110,
 }
 ## 商店随机抽商品的稀有度权重
 const RARITY_WEIGHTS := {
 	"common": 45, "uncommon": 30, "rare": 17, "epic": 6, "legendary": 2,
+}
+## 幸运护符（lucky_charm）的稀有度偏移系数：施加时该稀有度的权重 ×(1 + rarity_luck × 本值)。
+## [PLACEHOLDER] 未 playtest：想让护符更香就加大 rare/epic 的系数。
+const RARITY_LUCK_MUL := {
+	"common": -0.5, "uncommon": 0.0, "rare": 1.0, "epic": 1.5, "legendary": 2.0,
 }
 ## 每波上架几件商品
 const SHOP_SLOTS := 4
@@ -278,6 +363,84 @@ const SHOP_SLOTS := 4
 const MAGNET_DROP_CHANCE := 0.01
 ## [PLACEHOLDER] 拾取磁铁后的全场磁吸时长（秒）：期间场上所有掉落物无视拾取范围飞向玩家。
 const MAGNET_ALL_DURATION := 8.0
+
+# ---- Boss 宝箱（2026-10-08 玩法增补批次）----
+## 波 10/20 Boss 被击杀后原地掉落一只「宝箱」，拾取后弹三选一奖励面板
+## （金币袋 / 精选道具 / 武器精通+1）。落码：CombatResolver 掉落 → Battle 开面板。
+## [PLACEHOLDER] 金币曲线待 playtest：波 10 = 140、波 20 = 200、无尽继续涨。
+const BOSS_CHEST_GOLD_BASE := 80
+## 每波增量。
+const BOSS_CHEST_GOLD_PER_WAVE := 6
+## 宝箱在地板上的寿命（秒）—— 接近「不会过期」。真实流程里它必然在同波波末被
+## collect_all_pickups 真空回收，寿命只是防呆底线（宝箱是「必得」的，绝不能凭空过期）。
+const PICKUP_CHEST_LIFE := 9999.0
+## 「精选道具」奖励卡池：**只收 apply_item 单模块能闭环的商店道具** ——
+## 排除 s_reroll（跨模块键，必须由 Battle 刷新商店才有意义）与带负面代价的道具。
+## weapon_mastery_book 在已进化时会由 Battle 侧动态剔除（无效奖励是负反馈）。
+const BOSS_CHEST_ITEM_POOL: Array[String] = [
+	"brotato_chip", "endless_money", "mj_gloves", "weapon_mastery_book",
+	"vampire_fang", "multi_arrow", "helmet", "iron_armor", "scooter",
+	"finance_glasses", "s_resurrect",
+]
+
+
+## 宝箱金币奖励（随波次小幅增长）。Battle 生成奖励卡时调用，卡面与发放同源。
+static func boss_chest_gold(wave_num: int) -> int:
+	return BOSS_CHEST_GOLD_BASE + maxi(0, wave_num) * BOSS_CHEST_GOLD_PER_WAVE
+
+# ============================================================ 主动道具（2026-10-08 旗舰批次）
+# 初代设计欠账的实装：**1 个主动槽**（键盘空格 / HUD 右下大按钮），3 件原始规格见
+# docs/art/美术资源补充需求与提示词_2026-09-18.md §4.C（图标 2026-09-18 已入库）。
+#
+# 分工：
+#   · 装备/冷却状态住 Player（active_id / active_cd_t）—— 局内资源，reset() 清零；
+#   · 效果执行在 Battle（核弹/时停需要 enemies 数组，Battle 是唯一持有者）；
+#   · 冷却吃 cdr（MAX_CDR 注释「防主动道具零冷却」就是给它留的）：cd = base × (1 - cdr)。
+#
+# [PLACEHOLDER] 冷却沿用设计文档原值；核弹对 Boss 的伤害比例、冲刺加速倍率待 playtest。
+const ACTIVE_ITEMS := {
+	"active_nuke": {
+		"cooldown": 30.0,
+		# BOSS 不秒杀（一发带走终 Boss 就毁了节奏）→ 造成 max_hp 的该比例伤害。
+		"boss_dmg_pct": 0.25,
+	},
+	"active_speed_boots": {
+		"cooldown": 20.0,
+		"rush_time": 3.0,
+		"rush_speed_mul": 2.0,
+	},
+	"active_time_stop": {
+		"cooldown": 25.0,
+		"freeze_time": 3.0,   # BOSS 自动减半（Enemy.freeze 内置折扣）
+	},
+}
+## 主动道具的固定顺序（HUD/探针遍历用；与 shop_roll 无关）。
+const ACTIVE_IDS: Array[String] = ["active_nuke", "active_speed_boots", "active_time_stop"]
+
+
+## 是否主动道具 id（商店物品表与主动效果表的联合判定口径）。
+static func is_active_item(id: String) -> bool:
+	return ACTIVE_ITEMS.has(id)
+
+
+## 主动道具冷却基准秒（未知 id 返回 0）。
+static func active_cooldown(id: String) -> float:
+	if not ACTIVE_ITEMS.has(id):
+		return 0.0
+	return float(ACTIVE_ITEMS[id]["cooldown"])
+
+# ---- 忧郁光环 / 幸运护符（2026-10-08 补齐搁置道具；图标 2026-09-18 就在库）----
+## 忧郁光环（sadness_aura）：玩家周围该半径内的敌人持续减速（刷新式续杯）。
+const AURA_SLOW_RADIUS := 180.0
+## 光环施加节流与单次时长（条件满足时每 REFRESH 秒续 DUR 秒）。
+const AURA_SLOW_REFRESH := 0.5
+const AURA_SLOW_DUR := 1.0
+
+# ---- 低血警告 / 升级重抽（2026-10-08 体验小项）----
+## 血量占比低于该值时血条开始脉动警告（HUD 消费）。
+const LOW_HP_WARN_RATIO := 0.25
+## 脉动角速度（rad/s，HUD 的 sin 相位步进）。
+const LOW_HP_PULSE_SPEED := 7.0
 
 const ITEM_DEFS := {
 	"iron_fist": {"name": "铁拳手套", "rarity": "common", "desc": "攻击力 +15",
@@ -353,14 +516,46 @@ const ITEM_DEFS := {
 		"effect": {"shield_flat": 30.0}},
 	"s_resurrect": {"name": "复活币", "rarity": "rare", "desc": "本局死亡后原地复活一次（回 50% 生命）", "price": 80,
 		"effect": {"resurrect": 1}},
+	# ---- 2026-10-08 补齐两件搁置道具（图标早已入库）----
+	"sadness_aura": {"name": "忧郁光环", "rarity": "epic",
+		"desc": "身边的敌人移速 -25%（光环，自动生效）", "effect": {"slow_aura": 0.25}},
+	"lucky_charm": {"name": "幸运护符", "rarity": "epic",
+		"desc": "商店更容易刷出稀有商品", "effect": {"rarity_luck": 1.0}},
+	# ---- 主动道具（2026-10-08 旗舰批次）----
+	# 装备语义：购买后进【主动槽】（同时只持有一个，买新的直接替换 —— 换道具即换玩法）。
+	# name/desc 供商店卡面；冷却与效果参数在 ACTIVE_ITEMS（单一源，desc 里的秒数与它对应）。
+	# effect 的 "active_item" 只是「这是一件主动道具」的标记；装备动作由
+	# Player.apply_item 内的 equip_active(item_id) 完成（item_id 本身就是道具 id）。
+	"active_nuke": {"name": "肥嘟嘟核弹", "rarity": "rare", "price": 65,
+		"desc": "主动（空格/右下按钮）：全屏秒杀敌人（BOSS 受伤 25% 生命），冷却 30 秒",
+		"effect": {"active_item": 1.0}},
+	"active_speed_boots": {"name": "电动车冲刺", "rarity": "rare", "price": 50,
+		"desc": "主动（空格/右下按钮）：3 秒无敌冲刺，冷却 20 秒",
+		"effect": {"active_item": 1.0}},
+	"active_time_stop": {"name": "时间静止表", "rarity": "rare", "price": 58,
+		"desc": "主动（空格/右下按钮）：冻结全场敌人 3 秒（BOSS 减半），冷却 25 秒",
+		"effect": {"active_item": 1.0}},
 }
+
+
+## 单件道具的抽取权重 = 基础稀有度权重 × 幸运偏移。**唯一入口**（shop_roll 与本函数），
+## 探针按纯函数断言，不依赖随机流。
+## rarity_luck 缺省 0.0 时逐位返回原表值（旧行为与门禁基线不变）。
+static func rarity_weight(rarity: String, rarity_luck: float = 0.0) -> float:
+	var w := float(RARITY_WEIGHTS.get(rarity, 1))
+	if rarity_luck == 0.0:
+		return w
+	var mul := float(RARITY_LUCK_MUL.get(rarity, 0.0))
+	return w * maxf(0.1, 1.0 + rarity_luck * mul)
 
 
 ## 按稀有度权重抽 n 件不重复的商品（id 列表）。
 ## owned：本局已购道具集合（A4 前置解锁链）。带 requires 的道具只在其前置已购时
 ## 进池。**默认 null = 完全旧行为（全道具进池）**——不能用空数组当默认值：
 ## GDScript 里「缺省」与「显式传 []」无法区分，空数组默认会把前置件永远滤光。
-static func shop_roll(n: int, owned: Variant = null, mastery_level := -1) -> Array[String]:
+## rarity_luck（2026-10-08 幸运护符）：可选参数，缺省 0.0 = 权重逐位不变（旧调用方/探针零影响）。
+static func shop_roll(n: int, owned: Variant = null, mastery_level := -1,
+		rarity_luck: float = 0.0) -> Array[String]:
 	var pool: Array[String] = []
 	var weights: Array[float] = []
 	for id in ITEM_DEFS.keys():
@@ -372,7 +567,7 @@ static func shop_roll(n: int, owned: Variant = null, mastery_level := -1) -> Arr
 		if id == "weapon_mastery_book" and mastery_level >= WEAPON_EVOLVE_LEVEL:
 			continue
 		pool.append(String(id))
-		weights.append(float(RARITY_WEIGHTS[d["rarity"]]))
+		weights.append(rarity_weight(String(d["rarity"]), rarity_luck))
 	var out: Array[String] = []
 	var total := weights.size()
 	for i in mini(n, pool.size()):
@@ -405,6 +600,60 @@ static func shop_roll(n: int, owned: Variant = null, mastery_level := -1) -> Arr
 			out.insert(0, forced)
 			while out.size() > n:     # 挤掉最后一张，保持「上架 n 张」的语义
 				out.remove_at(out.size() - 1)
+	return out
+
+
+## 黑市商品抽取（2026-10-08 局内事件系统）：只用 rare 及以上的池子（不卖大路货）；
+## 加权规则与 shop_roll 同源（rarity_weight），随机源同为 rng_global（独立于全局 randf 流）。
+## 不重复上架（权重清零法，同 shop_roll）；n 超过池子大小时返回整个池子。
+static func black_market_roll(n: int, rarity_luck: float = 0.0) -> Array[String]:
+	var pool: Array[String] = []
+	var weights: Array[float] = []
+	for id in ITEM_DEFS.keys():
+		var d: Dictionary = ITEM_DEFS[id]
+		var rarity := String(d["rarity"])
+		if rarity == "common" or rarity == "uncommon":
+			continue
+		pool.append(String(id))
+		weights.append(rarity_weight(rarity, rarity_luck))
+	var out: Array[String] = []
+	var total := weights.size()
+	for i in mini(n, pool.size()):
+		var sum := 0.0
+		for j in total:
+			sum += weights[j]
+		if sum <= 0.0:
+			break
+		var roll := rng_global().randf() * sum
+		var acc := 0.0
+		var pick := -1
+		for j in total:
+			acc += weights[j]
+			if roll <= acc:
+				pick = j
+				break
+		if pick < 0:
+			break
+		out.append(pool[pick])
+		weights[pick] = 0.0       # 已抽到的不重复上架（权重清零）
+	return out
+
+
+## 祭坛 / 挑战奖励的「随机道具」抽取（2026-10-08 局内事件系统）：全池等权、不重复；
+## 排除「需要商店现场才有意义」的道具（s_reroll = 重新抽商品 —— 直接塞到手上是废纸）。
+## 随机源为 rng_global（与商店/黑市同流，独立于全局 randf）。
+static func altar_item_roll(n: int) -> Array[String]:
+	var pool: Array[String] = []
+	for id in ITEM_DEFS.keys():
+		var did := String(id)
+		if did == "s_reroll":
+			continue
+		pool.append(did)
+	var out: Array[String] = []
+	for i in mini(n, pool.size()):
+		var idx := rng_global().randi() % pool.size()
+		out.append(pool[idx])
+		pool.remove_at(idx)
 	return out
 
 
@@ -454,6 +703,114 @@ const BOSS_WAVES: Array[int] = [10, 20]
 static func is_boss_wave(wave_num: int) -> bool:
 	return BOSS_WAVES.has(wave_num) or (wave_num > WAVE_COUNT and wave_num % ENDLESS_BOSS_PERIOD == 0)
 
+# ---- 无尽 2.0：战场规则 + 里程碑（2026-10-08 第二梯队第五批）----
+#
+# 设计（评审方向「无尽现在是裸曲线」）：波 21 起，每 ENDLESS_ERA_LEN 波为一个「纪元」，
+# 换一条【战场规则】（表按纪元循环）；波 >20 的 ENDLESS_MILESTONE_STEP 倍数波清完即发
+# 里程碑补给（金币；每 10 波附加一件道具三选一）——「规则加压 + 补给回血」把无尽变成
+# 有节奏的马拉松，而不是纯看数值往上爬。
+#
+# 纪律（与难度/诅咒同规格）：
+#   · 规则 = 纯乘区/增量，全部在【已有数据入口】消费（spawn/hp/dmg/spd/loot/elite），
+#     消费点里不出现 if endless —— 差异只在读取口 endless_rule* 内收口；
+#   · 零随机消耗（纯读表）⇒ 正常游玩自检基线不漂；另有开关兜底：
+#   · endless_rules_enabled（静态开关）：selftest / selftest-defeat 下 Battle._ready 置
+#     false，规则 + 里程碑【整体禁用】—— 与 boss_phase_enabled 同模式，保测试基线。
+#     （探针进程不带 --selftest ⇒ 恒 true 可直接实测；balance 与正常游玩恒 true。）
+static var endless_rules_enabled := true
+
+## 纪元长度（波）：波 21-30 = 第 1 纪元、31-40 = 第 2 纪元……，表按纪元序号取模循环。
+const ENDLESS_ERA_LEN := 10
+## 第一个纪元的起始波（WAVE_COUNT + 1 = 21）。
+const ENDLESS_FIRST_ERA_WAVE := WAVE_COUNT + 1
+
+## 战场规则表（[PLACEHOLDER] 调平只改这张表，不动逻辑）。
+## 乘区键（缺省 1.0）：spawn_mul / hp_mul / dmg_mul / spd_mul / loot_mul；增量键（缺省 0）：elite_add。
+## loot_mul 作用于敌人掉落的金币（连带 xp_value = gold × XP_PER_GOLD，即「金币与经验」）。
+const ENDLESS_RULES := [
+	{"id": "horde", "name": "狂潮", "desc": "敌军规模 ×1.35，个体生命 ×0.88（更多更脆）",
+		"spawn_mul": 1.35, "hp_mul": 0.88},
+	{"id": "fortress", "name": "铁壁", "desc": "敌军个体生命 ×1.25，规模 ×0.85（更少更硬）",
+		"spawn_mul": 0.85, "hp_mul": 1.25},
+	{"id": "swift", "name": "疾行军", "desc": "敌军移速 ×1.28，金币与经验掉落 ×1.15",
+		"spd_mul": 1.28, "loot_mul": 1.15},
+	{"id": "blood_moon", "name": "血月", "desc": "敌军伤害 ×1.35，金币与经验掉落 ×1.3",
+		"dmg_mul": 1.35, "loot_mul": 1.3},
+	{"id": "hunt", "name": "猎场", "desc": "每波额外出现 2 只精英（掉金更多）",
+		"elite_add": 2},
+]
+
+## 里程碑：波 >20 的该步进倍数波清完 → 发补给。
+const ENDLESS_MILESTONE_STEP := 5
+## 每这么多个里程碑波（= 每 10 波）额外给一件道具（走宝箱三选一链）。
+const ENDLESS_MILESTONE_CHEST_EVERY := 10
+## 里程碑金币 = BASE + (wave − WAVE_COUNT) × PER_WAVE ⇒ 波 25=160 / 30=200 / 40=280 / 50=360。
+## [PLACEHOLDER] 参考商店道具价 40~80：一格补给 ≈ 两件商品的钱。
+const ENDLESS_MILESTONE_GOLD_BASE := 120
+const ENDLESS_MILESTONE_GOLD_PER_WAVE := 8
+
+
+## 纪元序号（0 起）：波 21-30 → 0、31-40 → 1……；波 ≤20 → −1（未进入无尽纪元）。
+static func endless_era(wave_num: int) -> int:
+	if wave_num <= WAVE_COUNT:
+		return -1
+	# 显式 floor（整数除法触发 INTEGER_DIVISION 警告；被除数恒正，floorf 安全）
+	return int(floorf(float(wave_num - ENDLESS_FIRST_ERA_WAVE) / float(ENDLESS_ERA_LEN)))
+
+
+## 当前波生效的战场规则（空字典 = 无规则：波 ≤20 / 开关关闭）。
+## 返回表内 const 条目（只读 —— const 容器写会报错，天然防污染）；按纪元序号取模循环。
+static func endless_rule(wave_num: int) -> Dictionary:
+	if not endless_rules_enabled:
+		return {}
+	var era := endless_era(wave_num)
+	if era < 0:
+		return {}
+	return ENDLESS_RULES[era % ENDLESS_RULES.size()]
+
+
+## 规则乘区统一读取口（缺省 1.0；无规则 / 开关关 = 1.0 —— 与旧行为逐位一致）。
+static func endless_rule_mul(wave_num: int, key: String) -> float:
+	var r := endless_rule(wave_num)
+	if r.is_empty():
+		return 1.0
+	return float(r.get(key, 1.0))
+
+
+## 规则增量统一读取口（缺省 0）。
+static func endless_rule_add(wave_num: int, key: String) -> int:
+	var r := endless_rule(wave_num)
+	if r.is_empty():
+		return 0
+	return int(r.get(key, 0))
+
+
+## 本波清完是否为里程碑（波 >20 且为 STEP 倍数）。
+static func is_endless_milestone(wave_num: int) -> bool:
+	return wave_num > WAVE_COUNT and wave_num % ENDLESS_MILESTONE_STEP == 0
+
+
+## 里程碑补给金币（含波次成长）。
+static func endless_milestone_gold(wave_num: int) -> int:
+	return ENDLESS_MILESTONE_GOLD_BASE + (wave_num - WAVE_COUNT) * ENDLESS_MILESTONE_GOLD_PER_WAVE
+
+
+## 本里程碑是否附带道具三选一（每 CHEST_EVERY 波；调用方先确认 is_endless_milestone）。
+static func endless_milestone_has_chest(wave_num: int) -> bool:
+	return wave_num > WAVE_COUNT and wave_num % ENDLESS_MILESTONE_CHEST_EVERY == 0
+
+# ---- 残敌清场加速（2026-10-08 玩法增补批次）----
+## 投放窗口关闭后，场上存活敌（不含 Boss）≤ 该值时进入「残局追击」：
+## 残敌直冲玩家（远程怪解除保持距离）+ 全体提速 —— 把「追最后几只」的跑图时间压下来。
+## 只影响清场尾，不改变任何波的投放量与敌人构成。
+## [PLACEHOLDER] 数值待 playtest：嫌不够快加 MUL / 嫌太凶减 MUL 或降 MAX_COUNT。
+const STRAGGLER_MAX_COUNT := 3
+## 残敌的临时提速乘区（走 Enemy.apply_temp_speed 的刷新式续杯，取 max 不叠乘）。
+const STRAGGLER_SPEED_MUL := 2.2
+## 提速 buff 刷新间隔与单次时长（条件满足时每 REFRESH 秒续 DUR 秒）。
+const STRAGGLER_REFRESH := 0.5
+const STRAGGLER_TEMP_DUR := 1.0
+
 # ============================================================ 难度系统（2026-09-20）
 #
 # 普通 / 困难两档。**现有全部数值 = 普通**，普通档系数恒为 1.0（selftest 逐位不漂的红线）。
@@ -495,8 +852,84 @@ static func difficulty_def() -> Dictionary:
 static func difficulty_name() -> String:
 	return String(difficulty_def()["name"])
 
+# ---- 开局诅咒（2026-10-08 第二梯队批次）----
+## 自选难度换成长加速：开局前可选 0~CURSE_MAX 条诅咒，每条让敌人更强 / 收益更差，
+## 但结算的局外强化点数（meta XP）× (1 + CURSE_XP_BONUS × 条数)。
+##
+## 效果字段 = 【增量】语义（curse_bonus(key) 求和后用 `1.0 + bonus` 当乘区）：
+##   hp_mul / dmg_mul / spd_mul / spawn_mul 为正 = 敌人更强；gold_mul 为负 = 收益更差。
+## 注入点（全部在数据入口乘系数 —— 与难度系统同一条纪律，散落 if 是禁止的）：
+##   hp/dmg → WaveDirector.spawn_enemy 的敌人代价乘区链；spd → Enemy.setup 的模板级移速；
+##   spawn → WaveDirector.planned_count()（投放量 + 清场进度分母共用）；
+##   gold → Player.add_gold 的入账乘区；xp → MetaSave.record_run 的 xp_mul 参数。
+## 探针/自检进程 curses 恒空 ⇒ 全部乘区 1.0，确定性基线零漂移。
+## 数值全 [PLACEHOLDER] 待 playtest。
+const CURSES := {
+	"curse_hp": {"name": "铁壁", "desc": "敌人生命 +25%", "hp_mul": 0.25},
+	"curse_dmg": {"name": "利齿", "desc": "敌人伤害 +25%", "dmg_mul": 0.25},
+	"curse_speed": {"name": "疾风", "desc": "敌人移速 +15%", "spd_mul": 0.15},
+	"curse_horde": {"name": "压境", "desc": "每波敌人数量 +20%", "spawn_mul": 0.20},
+	"curse_greed": {"name": "萧条", "desc": "金币收益 -30%", "gold_mul": -0.30},
+}
+## 同时可选的诅咒上限。
+const CURSE_MAX := 3
+## 每条诅咒的结算强化点数加成（meta XP 的乘区步长）。
+const CURSE_XP_BONUS := 0.25
+
+
+## 当前开局诅咒的某项【增量之和】（空诅咒 = 0.0）。使用法：乘区 = 1.0 + bonus。
+## 未知 id 静默忽略（坏存档 / 改名残留不崩 —— 与词缀查询同款「缺键不崩」）。
+static func curse_bonus(key: String) -> float:
+	var add := 0.0
+	for id in GameSession.curses:
+		var c: Dictionary = CURSES.get(String(id), {})
+		if c.has(key):
+			add += float(c[key])
+	return add
+
+
+## 结算 meta XP 的乘区：1 + CURSE_XP_BONUS × 条数（0 条 = 1.0 逐位不变）。
+static func curse_xp_mul() -> float:
+	return 1.0 + float(GameSession.curses.size()) * CURSE_XP_BONUS
+
+
+## 诅咒显示名（缺键回落 id 本身）。
+static func curse_name(id: String) -> String:
+	return String(CURSES.get(id, {}).get("name", id))
+
+# ---- 每日种子局（2026-10-09 meta 2.0 第二批）----
+## 每天一个固定随机种子（大家同一天进入 = 同一条随机流起手），破个人当日纪录。
+## 语义细节：
+##   · 种子 = 日期数字直取（2026-10-09 → 20261009），纯函数、可复现、人肉可验证；
+##   · 应用点在 Battle.start_run()（每局开局重放 —— 死亡重开也回同一起手，可反复练习）；
+##   · 只在【正常游玩进程】应用（自检/平衡/门禁探针一律不碰随机流 —— 守卫在
+##     Battle._apply_daily_seed，探针进程里调用它返回 false）。
+## 展示（HUD/标题）与「跨天重置」判定共用 daily_date_key 的同一日期格式。
+## （极端说明：跨午夜的一局理论与种子日差一天 —— 一局至多几十分钟，接受该边缘。）
+
+
+## 由年月日派生每日种子（纯函数 —— 探针直接对照）。月/日按十进制数位拼入：
+## 2026-10-09 → 2026 × 10000 + 10 × 100 + 09 = 20261009。
+static func daily_seed_from(year: int, month: int, day: int) -> int:
+	return year * 10000 + month * 100 + day
+
+
+## 今日种子（读系统日期，经 daily_seed_from）。
+static func daily_seed_value() -> int:
+	var dt := Time.get_date_dict_from_system()
+	return daily_seed_from(int(dt["year"]), int(dt["month"]), int(dt["day"]))
+
+
+## 今日日期键 "YYYY-MM-DD"（HUD/标题展示 + 每日记录跨天判定共用）。
+static func daily_date_key() -> String:
+	var dt := Time.get_date_dict_from_system()
+	return "%04d-%02d-%02d" % [int(dt["year"]), int(dt["month"]), int(dt["day"])]
+
 ## 波末升级三选一的选项数（基础值；学习嘉豪的天赋会 +1）。
 const UPGRADE_OPTIONS := 3
+## 每局「重抽」升级选项的次数（2026-10-08 体验小项；面板右上角按钮消费）。
+## [PLACEHOLDER] 未 playtest；将来可做成 meta 解锁项（+1 次）。
+const UPGRADE_REROLLS := 2
 
 # ============================================================ 角色
 
@@ -677,6 +1110,71 @@ static func weapon_evolution(char_id: String) -> Dictionary:
 	if WEAPON_EVOLUTIONS.has(char_id):
 		return WEAPON_EVOLUTIONS[char_id]
 	return {}
+
+# ---- 武器融合进化（2026-10-08 第二梯队）----
+## 主武器 × 副武器 6 配方（VS-like 融合）：主武器【已进化】（精通 6 层）+ 对应副武器
+## 【满级】（Lv5）→ 升级三选一必现「融合」卡，选后主武器获得融合形态。
+## 融合与第二形态【叠加】（不替换）：第二形态是满层质变，融合是第三条进化线。
+## 融合【不消耗副武器】—— 副武器继续工作（消耗会让满级玩家突然少一把武器 = 负反馈）。
+##
+## 每个配方字段：
+##   extra   配方副武器 id（须持有且满级）
+##   name    融合名（卡面主标题）
+##   desc    卡面效果描述
+## ⚠️ desc 里的数值与 FUSION_* 常量同口径（本文件下半区）—— 调常量时同步改 desc。
+const WEAPON_FUSIONS := {
+	"basic": {"extra": "orbit", "name": "环刃连奏",
+		"desc": "开火时向两侧甩出环刃（0.6 秒一次，伤害 ×0.9）"},
+	"study": {"extra": "lightning", "name": "落笔惊雷",
+		"desc": "命中 25% 概率劈雷（伤害 ×1.2）"},
+	"finance": {"extra": "missile", "name": "钞能导弹",
+		"desc": "击杀 20% 概率射出追踪导弹（伤害 ×1.4）"},
+	"sad": {"extra": "ice_nova", "name": "寒心冰封",
+		"desc": "命中施加 3 秒减速（移速 ×0.55）"},
+	"potato": {"extra": "acid", "name": "剧毒薯泥",
+		"desc": "爆裂溅射 35% 概率留下毒池"},
+	"kangaroo": {"extra": "orbit", "name": "旋风连拳",
+		"desc": "每 5 次开火甩出一圈环刃（伤害 ×0.9）"},
+}
+
+
+## 取某角色的融合配方。未登记 → 空字典（消费方零行为变化）。
+static func weapon_fusion(char_id: String) -> Dictionary:
+	if WEAPON_FUSIONS.has(char_id):
+		return WEAPON_FUSIONS[char_id]
+	return {}
+
+
+## ---- 融合效果数值（[PLACEHOLDER] 全部待 playtest；与 WEAPON_FUSIONS.desc 同口径）----
+## 环刃连奏 / 旋风连拳的飞刃：速度 / 寿命（≈射程 286px）/ 判定半径 / 伤害系数（atk ×）。
+const FUSION_BLADE_SPEED := 520.0
+const FUSION_BLADE_LIFE := 0.55
+const FUSION_BLADE_RADIUS := 14.0
+const FUSION_BLADE_DMG_MUL := 0.9
+const FUSION_BLADE_CD := 0.6          # 「环刃连奏」两次甩刃间的最小间隔（秒）
+const FUSION_BLADE_SIDE_DEG := 25.0   # 「环刃连奏」相对瞄准方向的左右偏角（度）
+const FUSION_WHIRL_EVERY := 5         # 「旋风连拳」每 N 次开火甩一圈
+const FUSION_WHIRL_COUNT := 4         # 「旋风连拳」一圈的刃数（360° 均分）
+const MAX_FUSION_BLADES := 12         # 场上飞刃护栏（性能；满时本次甩刃放弃）
+
+## 落笔惊雷：命中触发概率与伤害系数。
+const FUSION_THUNDER_CHANCE := 0.25
+const FUSION_THUNDER_DMG_MUL := 1.2
+
+## 钞能导弹：击杀触发概率 / 伤害系数 / 爆炸半径。
+const FUSION_MISSILE_CHANCE := 0.20
+const FUSION_MISSILE_DMG_MUL := 1.4
+const FUSION_MISSILE_BLAST := 60.0
+
+## 寒心冰封：减速乘区与持续时间（Boss 折扣在 Enemy.apply_slow 内部收口）。
+const FUSION_SLOW_MUL := 0.55
+const FUSION_SLOW_DUR := 3.0
+
+## 剧毒薯泥：溅射留池概率 / 池半径 / 伤害基数（与毒云同口径）/ 寿命。
+const FUSION_POOL_CHANCE := 0.35
+const FUSION_POOL_RADIUS := 56.0
+const FUSION_POOL_DPS_MUL := 0.6
+const FUSION_POOL_LIFE := 1.6
 
 # ---- 正弦怪潮（B1 迭代）：波内投放节奏呼吸化，总量精确守恒 ----
 ## 投放速率乘以 1 + A·sin(2π·elapsed/period)，period = SPAWN_WINDOW/2
@@ -879,11 +1377,40 @@ static func weapon_for_char(id: String) -> Dictionary:
 	return WEAPON_DEFS["basic"]
 
 
+## 生效武器 id（2026-10-09 meta 2.0 第二批·武器自由）—— **武器键的唯一判定实现**：
+## GameSession.weapon_pick 合法（在表内）→ 覆盖；空/非法 → 角色本命武器（= char_id）。
+## Player.weapon_id() 与启动打印等「不持 Player 的场景」都经这里 —— 口径永不分家。
+static func effective_weapon(char_id: String) -> String:
+	var pick := GameSession.weapon_pick
+	if pick != "" and WEAPON_DEFS.has(pick):
+		return pick
+	return char_id
+
+
 ## 取武器弹体颜色。回落 basic 金色。
 static func weapon_color(id: String) -> Color:
 	if WEAPON_COLORS.has(id):
 		return WEAPON_COLORS[id]
 	return WEAPON_COLORS["basic"]
+
+
+## 武器速览（2026-10-09 武器自由：CharSelect 武器行 / 起始武器选择子层共用）：
+## 「单次 N 发 · 伤害 ×X · 穿透 Y（+ 吸血/掉金）」。全部从 WEAPON_DEFS 推导 —— 改表即生效。
+static func weapon_summary(id: String) -> String:
+	var w := weapon_for_char(id)
+	var pierce := int(w["pierce"])
+	# pierce 99 是「贯穿全屏」的实现值，直接显示数字会让人以为要穿 99 个
+	var pierce_txt := "贯穿" if pierce >= 90 else "%d" % pierce
+	var parts: Array[String] = [
+		"单次 %d 发" % int(w["base_shots"]),
+		"伤害 ×%.2f" % float(w["dmg_mul"]),
+		"穿透 %s" % pierce_txt,
+	]
+	if float(w["lifesteal"]) > 0.0:
+		parts.append("吸血 %d%%" % roundi(float(w["lifesteal"]) * 100.0))
+	if float(w["gold_on_hit"]) > 0.0:
+		parts.append("命中 %d%% 掉金币" % roundi(float(w["gold_on_hit"]) * 100.0))
+	return " · ".join(parts)
 
 
 # ============================================================ 局内副武器（2026-09-22）
@@ -1008,7 +1535,12 @@ static var extra_weapon_cap_override := -1
 static func extra_weapon_cap() -> int:
 	if extra_weapon_cap_override > 0:
 		return mini(extra_weapon_cap_override, EXTRA_WEAPON_IDS.size())
-	return MAX_EXTRA_WEAPONS
+	var cap := MAX_EXTRA_WEAPONS
+	# meta 2.0 解锁「第三副武器槽」（2026-10-09）：+1。读 GameSession 快照 ——
+	# 自检 / 探针进程恒空 ⇒ cap 恒 2，旧基线逐位不漂（探针要测时手动设快照）。
+	if GameSession.has_unlock("unlock_extra_3"):
+		cap += 1
+	return cap
 
 ## 抽卡出现率：每次升级/波末三选一，按此概率把一张副武器卡【替换】进选项里。
 ## 文档 §3 要求「约普通升级卡权重的 1/3」—— 用替换而不是追加：
@@ -1279,22 +1811,34 @@ const ENEMY_TEMPLATES := {
 	"BossPUA": {"hp": 800, "dmg": 20, "spd": 40, "radius": 30, "gold": 30, "def": 0, "behavior": "boss",
 		"summon_type": "Rat", "summon_count": 2, "summon_aura": [1.3, 3.0],
 		"codex_name": "PUA 老板", "codex_desc": "老板，画饼大师，会召唤新员工。"},
+	# 宝箱怪（2026-10-08 局内事件系统）：伪装成宝箱的敌人 —— 走近「开箱」即现形。
+	# 数值刻意「咬得疼但打得死」：血比同波杂鱼厚得多（想跑要付代价、想打要花两秒）。
+	"Mimic": {"hp": 90, "dmg": 22, "spd": 75, "radius": 16, "gold": 8, "def": 0, "behavior": "melee",
+		"codex_name": "宝箱怪", "codex_desc": "长着宝箱样子的怪物，打死才给开箱。"},
 }
 
 # ---- 敌人图鉴（2026-09-22，需求见《敌人图鉴_给代码AI_2026-09-22.md》）----
 ## 图鉴显示顺序 = 玩家「应该」遇到敌人的顺序（波 1 的杂鱼 → 波 10/20 的 Boss）。
 ## **没在表里的敌人不进图鉴**：Medium（袋鼠怪数值替身）、Splitter 分裂出的小 Rat、
 ## Boss 召唤的杂鱼、精英召唤/召唤词缀产物 —— 它们要么是重复 id，要么是纯技能产物。
+## Mimic（2026-10-08）：出场路径 = 局内事件「宝箱怪」（不占波池），_ProbeCodex 的
+## 可达性断言按事件系统放行 —— 改出场方式时记得同步那里。
 const CODEX_ORDER := ["Slime", "Rat", "Student", "Charger", "Ox", "Splitter", "Bomber",
-	"Slacker", "Monitor", "Ranged", "Elite", "BossPUA", "Boss"]
+	"Slacker", "Monitor", "Ranged", "Elite", "Mimic", "BossPUA", "Boss"]
 
 
-## 图鉴文案查询（缺字段返回空串 —— 调用方空串即「不进图鉴」，不崩）。
+## 图鉴文案查询（不在图鉴的 id / 缺字段 → 空串 —— 调用方空串即「不进图鉴」，不崩）。
+## ⚠️ 前置白名单（2026-10-09 批量测修正）：enemy_template 对未知 id 回落 Slime 模板，
+## 直接透传会把 Slime 的文案「串」给未知 id；先按 CODEX_ORDER 白名单挡一道。
 static func codex_name(type_name: String) -> String:
+	if not is_codex_enemy(type_name):
+		return ""
 	return String(enemy_template(type_name).get("codex_name", ""))
 
 
 static func codex_desc(type_name: String) -> String:
+	if not is_codex_enemy(type_name):
+		return ""
 	return String(enemy_template(type_name).get("codex_desc", ""))
 
 
@@ -1350,6 +1894,7 @@ const ENEMY_TAUNTS := {
 	"Splitter": {"spawn": "我精神状态很好", "death": "啊啊啊裂开了！！"},
 	"Monitor": {"spawn": "大家加油鸭~", "skill": {"pulse": "都动起来！"}, "death": "后排也要挨打……"},
 	"Slacker": {"spawn": "摸鱼中勿扰", "death": "鱼没了……"},
+	"Mimic": {"spawn": "谁在开箱？", "death": "箱里的东西……归你了……"},
 }
 
 ## 入场/击杀台词查询。缺键返回空串（调用方空串即静默）。
@@ -1404,6 +1949,58 @@ static func elite_count(wave_num: int) -> int:
 const ELITE_GOLD_MUL := 3.0
 ## [PLACEHOLDER] 精英必掉「商店券」→ 进下一家商店消费 1 张，全店 8 折（一次性）。
 const COUPON_DISCOUNT := 0.8
+## [PLACEHOLDER] 商店券结算回收价（2026-10-08 旗舰批次）：局终（通关/阵亡）时手上未消费的
+## 商店券按此价折算成金币入账 —— 否则「决战前捡到的券」在通关局里白丢。取 25 ≈ 一单 8 折
+## 省下的中位金（道具价 40~80），比「真用掉」略亏、比「白丢」明显好。
+const COUPON_SALVAGE_GOLD := 25
+
+# ---- 局内事件系统（2026-10-08 第二梯队批次）----
+## 波内低频随机事件：献祭祭坛 / 黑市商人 / 限时挑战柱 / 宝箱怪。
+## 设计约束：① 每波开波时按概率生成【最多 1 个】，波 1-2 新手保护期不出；
+## ② 自检 / 平衡 / 探针进程不生成（随机流与清场判定零污染，探针手动生成来测）；
+## ③ 事件实体一次性 —— 用掉即消失；「离开」保留，需走开（re-arm）再回来才能重触发。
+## 全部数值 [PLACEHOLDER] 待 playtest。
+const EVENT_MIN_WAVE := 3
+const EVENT_SPAWN_CHANCE := 0.35
+## 事件种类（不含宝箱怪 —— 它是伪装成宝箱的掉落物，见 Pickup.KIND_MIMIC）。
+const EVENT_KINDS: Array[String] = ["altar", "market", "pillar"]
+## 宝箱怪的出现权重：生成事件时先按此概率判定「这次是宝箱怪」，否则三选一等权。
+const EVENT_MIMIC_CHANCE := 0.3
+## 触发距离（px）与 re-arm 倍率：「离开」事件面板后走开 TRIGGER×REARM 再回来可重触发。
+const EVENT_TRIGGER_DIST := 56.0
+const EVENT_REARM_MUL := 1.8
+## 事件实体生成位置：围绕玩家的距离带（px）——太近无意义、太远玩家懒得去。
+const EVENT_SPAWN_DIST_MIN := 420.0
+const EVENT_SPAWN_DIST_MAX := 700.0
+
+## 献祭祭坛：两笔交易 —— 血祭（失去当前生命比例 → 随机道具）/ 金祭（失去金币比例 → 武器精通）。
+const ALTAR_HP_COST_RATIO := 0.4
+const ALTAR_ITEM_COUNT := 2
+const ALTAR_GOLD_COST_RATIO := 0.5
+const ALTAR_GOLD_MIN := 40            # 金币低于此值不出现「金祭」选项（白送不出去）
+const ALTAR_MASTERY_STACKS := 2       # 金祭给 2 层武器精通
+
+## 限时挑战柱：开柱后 CHALLENGE_TIME 秒内杀够数领奖（杀任何敌人都计入 —— 波内多杀挑战）。
+const CHALLENGE_TIME := 20.0
+const CHALLENGE_ENEMY_COUNT := 10
+const CHALLENGE_FULL_KILLS := 9
+const CHALLENGE_HALF_KILLS := 5
+const CHALLENGE_FULL_GOLD := 120
+const CHALLENGE_HALF_GOLD := 50
+## 挑战援军围绕挑战柱的生成半径。
+const CHALLENGE_RING_RADIUS := 190.0
+
+## 黑市商人：波内商店 —— 价格贵（×1.3）、池子稀有（rare 及以上，不卖大路货）。
+const BLACK_MARKET_SLOTS := 3
+const BLACK_MARKET_PRICE_MUL := 1.3
+
+## 事件元数据（名字 / 主题色：实体绘制、触发飘字、HUD 提示共用）。
+const EVENT_DEFS := {
+	"altar": {"name": "献祭祭坛", "color": Color(0.85, 0.35, 0.45)},
+	"market": {"name": "黑市商人", "color": Color(0.55, 0.45, 0.85)},
+	"pillar": {"name": "挑战柱", "color": Color(1.0, 0.78, 0.30)},
+	"mimic": {"name": "宝箱怪", "color": Color(0.90, 0.60, 0.20)},
+}
 ## [PLACEHOLDER] 词缀底色与精灵原色的混合比例。取 1.0 = 纯词缀色会吃掉原画细节，
 ## 0.6 既一眼可分（青/灰/橙红/紫/红）又保留造型辨识度。
 const AFFIX_TINT_MIX := 0.6
@@ -1623,6 +2220,73 @@ const BOSS_RAGE_SHAKE := 14.0
 ## Boss 仍未被击杀就放行推进 —— 无敌/自动驾驶玩家可能打不死动态血 Boss，
 ## 没有兜底流程门禁会卡死在波 10。正常游玩【没有】这条（Boss 不死波就不结束）。
 const BOSS_WAVE_TEST_GRACE := 60.0
+
+# ---- Boss 阶段战（2026-10-08 第二梯队）----
+## 阶段阈值表 {Boss 类型: [P1 起点, P2 阈值, P3 阈值...]}（血量占比，严格降序）。
+## 血量首次跌破 phases[k] → 推进到 k+1 阶段（一次伤害最多推一档，溢出不连跳 ——
+## 转阶段无敌帧天然把连跳挡住）。未登记的类型 = 旧行为（无阶段，只有半血狂暴）。
+##   BossPUA（波 10）2 阶段：50% 进 P2（与旧半血狂暴【同刻】—— 两个信号并排发，
+##     Battle 侧两条播报先后刷新同一中央 label，最终显示阶段文案，语义=「它暴走了」）。
+##   Boss 袋鼠王（波 20 / 无尽循环）3 阶段：66% / 33%。
+const BOSS_PHASES := {
+	"BossPUA": [1.0, 0.5],
+	"Boss": [1.0, 0.66, 0.33],
+}
+
+## 阶段推进的一步乘区（P(k-1) → P(k) 切换瞬间生效，[PLACEHOLDER] 待 playtest）：
+##   speed    → 移速【字段】直接乘（同「狂怒」精英词缀纪律：contact/索敌等全部
+##              消费点自动生效、不会漏；与运行时减速乘区（_slow_mul）互不污染）
+##   dmg      → 伤害【字段】直接乘（同上；fan 弹道 / 冲锋接触伤害一起吃到）
+##   interval → boss_interval_mul 乘区（下一次出招冷却 = BOSS_SKILL_INTERVAL × 它）
+##   summon   → boss_summon_bonus 加成（召唤数 = 模板值 + 加成）
+const BOSS_PHASE_STEP := {"speed": 1.15, "dmg": 1.15, "interval": 0.85, "summon": 1}
+
+## 转阶段无敌时长（秒）：期间吸收全部伤害 —— 给演出留「看得见」的窗口，
+## 同时防止一记大伤害把两个阶段连起来跳。
+const BOSS_PHASE_IFRAME := 0.7
+## 阶段横幅停留时长（秒）与震屏强度（像素）。
+const BOSS_PHASE_NOTICE_TIME := 1.8
+const BOSS_PHASE_SHAKE := 12.0
+
+## 测试基线的总开关（Battle._ready 按 selftest 置位）：false = 阶段推进【与】波 15 小 Boss
+## 生成均不生效（selftest / selftest-defeat 保持旧基线）；balance / 探针 / 正常游玩恒 true。
+## 为什么做成静态位（而不是守卫进程标志）：Enemy / WaveDirector 不持 Battle 引用，
+## 静态位是唯一无反向依赖的注入通道（同 debug_force_upgrade 的既有模式）。
+static var boss_phase_enabled := true
+
+
+## 取某 Boss 的阶段阈值表。未登记 / 非 Boss → 空数组（消费方零行为变化）。
+static func boss_phases(type_name: String) -> Array:
+	if BOSS_PHASES.has(type_name):
+		return BOSS_PHASES[type_name]
+	return []
+
+
+# ---- 波 15 小 Boss（2026-10-08 第二梯队）----
+## 小 Boss 波（固定表）：在普通波基础上额外刷一只【弱化版 Boss】—— 波 10 与波 20 之间的
+## 中期调剂。真 Boss 的血量曲线对 15 波太厚，用 SUBBOSS_HP_MUL 打折（≈ 平均怪血 ×21.6）。
+const SUBBOSS_WAVES: Array[int] = [15]
+## 小 Boss 模板：复用 BossPUA 全套（三招 + 阶段 + 台词 + 死亡掉宝箱）。
+const SUBBOSS_TYPE := "BossPUA"
+## 小 Boss 血量折扣（相对同公式的真 Boss 动态血）。
+const SUBBOSS_HP_MUL := 0.4
+
+
+## 是否小 Boss 波（固定表；无尽 21+ 已有每 10 波的真 Boss，不另行补）。
+static func is_sub_boss_wave(wave_num: int) -> bool:
+	return SUBBOSS_WAVES.has(wave_num)
+
+
+## 小 Boss 动态血乘区：与 boss_wave_hp_mul 同公式，以 SUBBOSS_TYPE 当归一分母、× 折扣。
+## （不能用 boss_wave_hp_mul(15)：它按 boss_type_for_wave 选型，波 15 会算成袋鼠王。）
+static func sub_boss_hp_mul(wave_num: int) -> float:
+	var boss_base := float(ENEMY_TEMPLATES[SUBBOSS_TYPE]["hp"])
+	var avg := _avg_pool_template_hp(wave_num)
+	if boss_base <= 0.0:
+		return 1.0
+	var d := difficulty_def()
+	return avg * BOSS_HP_AVG_MUL * float(d["boss_hp_mul"]) \
+		/ (boss_base * float(d["hp_mul"])) * SUBBOSS_HP_MUL
 
 
 ## 本波刷怪池的普通怪【模板】平均血（不含波次/难度缩放 —— 缩放由 Enemy.setup 统一乘）。

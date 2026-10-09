@@ -71,6 +71,9 @@ const ENEMIES := {
 	"Slacker": {"sprite": "enemies/slacker.png", "anim": "", "idle": 0, "content_h": 250, "foot_y": 253},
 	"Monitor": {"sprite": "enemies/monitor.png", "anim": "", "idle": 0, "content_h": 252, "foot_y": 254},
 	"BossPUA": {"sprite": "enemies/boss_pua.png", "anim": "", "idle": 0, "content_h": 254, "foot_y": 255},
+	# 宝箱怪（2026-10-08 局内事件系统；2026-10-09 换豆包美术图，与 drops/chest.png 同款木+金配色）。
+	# content_h / foot_y = 入库脚本对 alpha 包围盒的实测值（图 256×256 满幅、底边 y=253）。
+	"Mimic": {"sprite": "enemies/mimic.png", "anim": "", "idle": 0, "content_h": 232, "foot_y": 253},
 }
 
 # ================================================================ 美术实测数据
@@ -227,6 +230,23 @@ const DROPS := {
 	"hp": "drops/hp.png",
 	"xp": "drops/xp.png",
 	"magnet": "drops/magnet.png",
+	# 2026-10-09 美术入库：宝箱（Boss 必掉）/ 商店券（精英必掉）—— 真图替代图元占位。
+	# ⚠️ 宝箱怪伪装态（Pickup.KIND_MIMIC）与 chest【共用同一张图】是刻意设计 —— 欺骗性就是玩法本体。
+	# 「mimic」键存在的唯一意义 = 让 Pickup._setup_visuals 的统一查表路径拿到图（此前注释里写
+	# 「与 KIND_CHEST 逐像素同款」但没接上；#32 修了图元分支、本次接上 sprite 路径）。
+	"chest": "drops/chest.png",
+	"coupon": "drops/coupon.png",
+	"mimic": "drops/chest.png",
+}
+
+## 局内事件实体贴图（2026-10-09 美术入库；键 = GameStats.EVENT_KINDS 的元素）。
+## 【无留白】入库（内容缩到最长边 256 后裁切）—— EventNode 按【纹理高度】缩放到显示高度、
+## 底边对齐节点原点（同武器弹道的无留白口径，不走 content_h/foot_y）。
+## 未登记 / 缺图 → null（EventNode 回落图元占位画法，「没美术也能跑」）。
+const EVENTS := {
+	"altar": "events/altar.png",
+	"market": "events/market.png",
+	"pillar": "events/pillar.png",
 }
 
 const ITEMS := {
@@ -296,6 +316,8 @@ const UPGRADE_ICONS := {
 	"lucky": "ui/upgrade_lucky.png",
 	"maxHpPct": "ui/upgrade_maxHpPct.png",
 	"cdr": "ui/upgrade_cdr.png",
+	# 2026-10-09 补：武器精通是 22 张升级卡里最后一张没图标的（卡面恒空白），豆包出图后补齐。
+	"weapon_mastery": "ui/upgrade_weapon_mastery.png",
 }
 
 ## 副武器本体贴图（键 = 副武器 id，见 GameStats.EXTRA_WEAPON_DEFS）。
@@ -307,20 +329,50 @@ const EXTRA_WEAPON_TEX := {
 	"missile": "weapons/w_missile.png",       # 148×256（绿身红尾翼小火箭，头朝上）
 }
 
-## 副武器【UI 图标】（2026-09-22 用户需求：三把程序化副武器补齐卡面图标）。
+## 副武器【UI 图标】（2026-09-22 建；2026-10-09 补齐五把）。
 ## 与 EXTRA_WEAPON_TEX 的分工 —— 两张表不是一回事：
 ##   · EXTRA_WEAPON_TEX  = 游戏内【实体贴图】。只有 orbit / missile 用得上；
 ##     闪电 / 冰霜 / 毒云按设计就是程序化绘制的（ExtraWeaponSystem 里的 *_FX 内部类）。
 ##   · EXTRA_WEAPON_ICON = 纯【UI 图标】。升级三选一卡面 + HUD 手持行都读它。
-##     orbit / missile 刻意【不登记】—— extra_weapon_icon() 会回落到本体贴图
-##     （一把刀 / 一枚火箭本身就是好图标，没必要重画）。
-## 三张图标由 `docs/review/make_extra_weapon_icons.py` 程序化生成（128×128 RGBA、
-## mipmaps/generate 已置 true），视觉语言与游戏内程序化特效一致（浅蓝锯齿 / 冰蓝六刺 /
-## 绿圈气泡）—— 与 make_button_skin.py 同属「贴图代码化」惯例。
+## 2026-10-09 美术入库后【五把全有专属方形图标】：orbit / missile 不再回落到本体贴图
+## （256×71 的刀 / 148×256 的火箭在方形槽里显示成细条 —— 已知观感缺口，本次修复）。
+## 前 3 张由 `make_extra_weapon_icons.py` 程序化生成（浅蓝锯齿 / 冰蓝六刺 / 绿圈气泡）；
+## 后 2 张为豆包出图（见 docs/art/美术需求_第二梯队出图提示词_2026-10-09.md B2 / C4）。
 const EXTRA_WEAPON_ICON := {
 	"lightning": "ui/extra_lightning.png",
 	"ice_nova": "ui/extra_ice_nova.png",
 	"acid": "ui/extra_acid.png",
+	"orbit": "ui/extra_orbit.png",
+	"missile": "ui/extra_missile.png",
+}
+
+## 诅咒图标（2026-10-09 美术入库；键 = GameStats.CURSES 的 id）—— 标题页诅咒子层按钮左侧小图标。
+## 缺图 → null，Title 构建时跳过图标（文字照常）。
+const CURSE_ICONS := {
+	"curse_hp": "ui/curse_hp.png",
+	"curse_dmg": "ui/curse_dmg.png",
+	"curse_speed": "ui/curse_speed.png",
+	"curse_horde": "ui/curse_horde.png",
+	"curse_greed": "ui/curse_greed.png",
+}
+
+## meta 解锁图标（2026-10-09 美术入库；键 = MetaSave.META_UNLOCKS 的 id）—— 局外强化页解锁网络格。
+## 缺图 → null（格子只显示文字，不画白块）。
+const UNLOCK_ICONS := {
+	"unlock_active_2": "ui/unlock_active_2.png",
+	"unlock_extra_3": "ui/unlock_extra_3.png",
+	"unlock_weapon_free": "ui/unlock_weapon_free.png",
+	"unlock_daily": "ui/unlock_daily.png",
+}
+
+## 无尽战场规则图标（2026-10-09 美术入库；键 = GameStats.ENDLESS_RULES 的 id）—— 开波横幅图标。
+## 缺图 → null（横幅只显示文字）。
+const ENDLESS_ICONS := {
+	"horde": "ui/endless_horde.png",
+	"fortress": "ui/endless_fortress.png",
+	"swift": "ui/endless_swift.png",
+	"blood_moon": "ui/endless_blood_moon.png",
+	"hunt": "ui/endless_hunt.png",
 }
 
 const UI := {
@@ -572,12 +624,40 @@ static func extra_weapon_tex(weapon_id: String) -> Texture2D:
 
 
 ## 副武器【UI 图标】（升级三选一卡面 / HUD 手持行）。
-## 优先取专属图标表；没登记（orbit / missile）则回落到本体贴图 —— 调用方拿到的
+## 优先取专属图标表；未登记则回落到本体贴图。2026-10-09 后五把全部登记了专属方形图标，
+## 回落分支仅作「图标文件缺图 / 未来新增武器没配图」的兜底。调用方拿到的
 ## 要么是一张能看的图，要么是 null（那就只显示文字，绝不画白方块）。
 static func extra_weapon_icon(weapon_id: String) -> Texture2D:
 	if EXTRA_WEAPON_ICON.has(weapon_id):
 		return tex(EXTRA_WEAPON_ICON[weapon_id])
 	return extra_weapon_tex(weapon_id)
+
+
+## 局内事件实体贴图（键 = EVENT_KINDS）。缺图 → null（EventNode 回落图元占位）。
+static func event_sprite(kind: String) -> Texture2D:
+	if not EVENTS.has(kind):
+		return null
+	return tex(EVENTS[kind])
+
+
+## 诅咒 / meta 解锁 / 无尽规则三类小图标（标题页 / 局外强化页 / 开波横幅）。
+## 缺图统一返回 null，调用方跳过图标只显示文字（「没美术也能跑」惯例）。
+static func curse_icon(id: String) -> Texture2D:
+	if not CURSE_ICONS.has(id):
+		return null
+	return tex(CURSE_ICONS[id])
+
+
+static func unlock_icon(id: String) -> Texture2D:
+	if not UNLOCK_ICONS.has(id):
+		return null
+	return tex(UNLOCK_ICONS[id])
+
+
+static func endless_icon(id: String) -> Texture2D:
+	if not ENDLESS_ICONS.has(id):
+		return null
+	return tex(ENDLESS_ICONS[id])
 
 
 ## UI 元件纹理（摇杆 / 卡框 / 金币条 / 按钮等）。未登记或缺图返回 null，调用方自行回落。
@@ -623,6 +703,19 @@ static func all_paths() -> Array[String]:
 			out.append("%s/idle/idle_%d.png" % [ei["anim"], i])
 	for k in DROPS.keys():
 		out.append(DROPS[k])
+	# 2026-10-09 起：图标类与事件实体也进校验（此前只登记不遍历 —— 新图入库后一并纳入门禁[5]）。
+	for k in EVENTS.keys():
+		out.append(EVENTS[k])
+	for k in UPGRADE_ICONS.keys():
+		out.append(UPGRADE_ICONS[k])
+	for k in EXTRA_WEAPON_ICON.keys():
+		out.append(EXTRA_WEAPON_ICON[k])
+	for k in CURSE_ICONS.keys():
+		out.append(CURSE_ICONS[k])
+	for k in UNLOCK_ICONS.keys():
+		out.append(UNLOCK_ICONS[k])
+	for k in ENDLESS_ICONS.keys():
+		out.append(ENDLESS_ICONS[k])
 	for k in ITEMS.keys():
 		out.append(ITEMS[k])
 	for k in UI.keys():

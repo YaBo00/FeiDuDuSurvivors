@@ -2,7 +2,7 @@ extends SceneTree
 ## 独立验证探针：敌人图鉴（2026-09-22，需求见《敌人图鉴_给代码AI_2026-09-22.md》）。
 ##
 ## 被验证的契约：
-##   GameStats.CODEX_ORDER —— 13 条、无重复、全在 ENEMY_TEMPLATES / AssetDB.ENEMIES 里
+##   GameStats.CODEX_ORDER —— 14 条、无重复、全在 ENEMY_TEMPLATES / AssetDB.ENEMIES 里
 ##   GameStats.codex_name / codex_desc / is_codex_enemy —— 文案与「进不进图鉴」判定
 ##   出场路径可达性：每个图鉴 id 都能在真实玩法里刷出来（波池 / 精英 / Boss），
 ##     不然图鉴就是个永远填不满的格子
@@ -62,7 +62,7 @@ func _arm() -> void:
 # ---------------------------------------------------------------- A. 静态表契约
 func _t_table() -> void:
 	var n := GameStats.CODEX_ORDER.size()
-	_check(n == 13, "CODEX_ORDER 13 条（实际 %d）" % n)
+	_check(n == 14, "CODEX_ORDER 14 条（实际 %d）" % n)
 
 	# 无重复（重复会让图鉴出现两个同名格子，且 codex_state 的键会互相覆盖）
 	var uniq: Dictionary = {}
@@ -109,7 +109,10 @@ func _t_table() -> void:
 		var via_boss: bool = (t == "BossPUA" and GameStats.boss_type_for_wave(10) == "BossPUA") \
 			or (t == "Boss" and GameStats.boss_type_for_wave(20) == "Boss")
 		var via_elite: bool = t == "Elite" and GameStats.elite_count(20) > 0
-		if not (via_boss or via_elite):
+		# Mimic（2026-10-08 事件系统）：出场路径 = 局内事件「宝箱怪」（不占波池）。
+		# 断言的锚点 = 事件开关为开（关掉事件系统时这里应同步报警）。
+		var via_event: bool = t == "Mimic" and float(GameStats.EVENT_MIMIC_CHANCE) > 0.0
+		if not (via_boss or via_elite or via_event):
 			missing.append(t)
 	_check(missing.is_empty(), "每个图鉴 id 都有真实出场路径（波池 / 精英 / Boss），缺：%s" % str(missing))
 

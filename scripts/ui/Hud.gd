@@ -2,6 +2,10 @@ class_name Hud
 extends CanvasLayer
 ## 屏幕 HUD：血条 + 经验条 / 波次号 + 清场进度条 / 等级 / 金币。全部用中文显示。
 
+## 主动道具槽发动请求（2026-10-08 旗舰批次）：点击图标按钮时发出，带槽号（1/2）。
+## Battle 连到 _try_use_active(slot)（与空格 / F 键同一入口、同一守卫）。
+signal active_use_requested(slot: int)
+
 var _root: Control
 var _hp_fill: ColorRect
 var _hp_text: Label
@@ -28,6 +32,18 @@ var _extra_row: Control = null
 var _extra_slots: Array = []
 ## 内容指纹（"id:lv," 拼接）。HUD 拍是 0.08s，内容没变时直接返回，不碰任何节点。
 var _extra_sig := ""
+## ---- 主动道具槽（2026-10-08 旗舰批次建；2026-10-09 meta 2.0 双槽化）----
+## 右下角两个图标按钮：图标 + 冷却遮罩 + 剩余秒数 + 金框（就绪态）。状态全从 Player 读
+## （槽 1 = active_id / 槽 2 = active_id_2），HUD 不持有任何战斗状态；空槽整块隐藏。
+## 每槽 = {root, frame, box, icon, mask, cd_label, sig}；[0] = 空格、[1] = F（需解锁）。
+## sig = 内容指纹（道具 id）：变化才换图标，其余（遮罩/颜色/秒数）每拍直刷。
+var _a_slots: Array[Dictionary] = []
+## ---- 低血警告（2026-10-08 旗舰批次）----
+## hp 比例 ≤ LOW_HP_WARN_RATIO 时：血条填充色按 sin 脉动 + 血条上方出红字警示。
+## 脉动在 _process 每帧跑（比 HUD 拍 0.08s 顺滑），状态由 set_data 每拍同步。
+var _low_hp := false
+var _pulse_t := 0.0
+var _danger_label: Label = null
 
 const BAR_W := 320.0
 const BAR_H := 22.0
@@ -68,6 +84,24 @@ const EXTRA_PIPS_MAX := 5
 const EXTRA_PIP_ON := Color("#FFD24A")
 const EXTRA_PIP_OFF := Color(0.30, 0.33, 0.42)
 const EXTRA_SLOT_BG := Color(0.04, 0.04, 0.09, 0.62)
+
+## ---- 主动道具槽几何（2026-10-08 旗舰批次；双槽 2026-10-09）----
+## 右下角：底部血条（居中 320 宽，x 480~800）与触屏摇杆（按落点动态摆）都不占这个固定角。
+## 双槽 = 槽 1 贴右缘（旧位置）、槽 2 在槽 1 左侧隔 ACTIVE_SLOT_GAP。
+const ACTIVE_SIZE := 76.0
+const ACTIVE_EDGE := 3.0
+const ACTIVE_X := GameStats.VIEW_WIDTH - ACTIVE_SIZE - 24.0
+const ACTIVE_Y := GameStats.VIEW_HEIGHT - ACTIVE_SIZE - 24.0
+const ACTIVE_SLOT_GAP := 12.0
+## 就绪 / 冷却的槽底色与描边：就绪 = 金框 + 深金底（一眼「可点」）；
+## 冷却 = 灰底 + 自上而下的黑遮罩（遮罩高度 = 冷却剩余比例）+ 剩余秒数。
+const ACTIVE_BG_READY := Color(0.17, 0.13, 0.03, 0.88)
+const ACTIVE_BG_COOL := Color(0.05, 0.05, 0.10, 0.80)
+const ACTIVE_MASK_COLOR := Color(0.0, 0.0, 0.0, 0.62)
+const ACTIVE_EDGE_COLOR := Color("#FFD24A")
+## 低血警告（2026-10-08 旗舰批次）：血条脉动的基色/峰色（基色 = 血条常态红）。
+const LOW_HP_BASE := Color("#ff4444")
+const LOW_HP_PEAK := Color("#ffa0a0")
 
 
 func _ready() -> void:
@@ -208,6 +242,104 @@ func _ready() -> void:
 		_extra_slots.append(_build_extra_slot(
 			float(i) * (EXTRA_SLOT + EXTRA_SLOT_GAP), EXTRA_TITLE_H))
 
+	# 主动道具槽（2026-10-08 旗舰批次）：右下角，空槽整块隐藏。
+	_build_active_slot()
+
+	# 低血警示字（2026-10-08 旗舰批次）：血条上方居中，仅低血时显示（set_data 控制）。
+	_danger_label = _make_label(BAR_X, BAR_Y - 32.0, BAR_W, 26.0)
+	_danger_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_danger_label.add_theme_font_size_override("font_size", 19)
+	_danger_label.add_theme_color_override("font_color", Color("#ff6b6b"))
+	_danger_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	_danger_label.add_theme_constant_override("outline_size", 5)
+	_danger_label.text = "危险！生命值过低"
+	_danger_label.visible = false
+
+
+## 主动道具槽（双槽；2026-10-08 建、2026-10-09 meta 2.0 双槽化）：右下角图标按钮。
+## 结构从后到前：金框（就绪才显示）→ 深色底 → 图标 → 冷却遮罩（自上而下）→ 剩余秒数 → 点击层。
+## 点击层是唯一 STOP 接收输入的节点；其余全部 IGNORE，不会挡住战场点击。
+## 槽 1 = 空格（历史位置，贴右缘）；槽 2 = F（在槽 1 左侧；未装备时整块隐藏）。
+func _build_active_slot() -> void:
+	_a_slots = [
+		_build_active_slot_at(ACTIVE_X, "空格", 1),
+		_build_active_slot_at(ACTIVE_X - ACTIVE_SIZE - ACTIVE_SLOT_GAP, "F", 2),
+	]
+
+
+## 建一个主动槽（槽 1 / 槽 2 共用的唯一构建入口）。返回字段字典：
+## {root, frame, box, icon, mask, cd_label, sig} —— 刷新全部走 _refresh_active_slot。
+func _build_active_slot_at(x: float, key_text: String, slot: int) -> Dictionary:
+	var root := Control.new()
+	root.position = Vector2(x, ACTIVE_Y)
+	root.size = Vector2(ACTIVE_SIZE, ACTIVE_SIZE)
+	root.visible = false
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(root)
+
+	# 金框：比槽底每边大 ACTIVE_EDGE，就绪时整体亮一档 = 「现在能按」。
+	var frame := ColorRect.new()
+	frame.color = ACTIVE_EDGE_COLOR
+	frame.position = Vector2(-ACTIVE_EDGE, -ACTIVE_EDGE)
+	frame.size = Vector2(ACTIVE_SIZE + ACTIVE_EDGE * 2.0, ACTIVE_SIZE + ACTIVE_EDGE * 2.0)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(frame)
+
+	var box := ColorRect.new()
+	box.color = ACTIVE_BG_COOL
+	box.size = Vector2(ACTIVE_SIZE, ACTIVE_SIZE)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(box)
+
+	var icon := TextureRect.new()
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.position = Vector2(8.0, 8.0)
+	icon.size = Vector2(ACTIVE_SIZE - 16.0, ACTIVE_SIZE - 16.0)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(icon)
+
+	# 冷却遮罩：自上而下盖住 ratio 高度（满盖 → 随冷却推进露出图标）。
+	var mask := ColorRect.new()
+	mask.color = ACTIVE_MASK_COLOR
+	mask.size = Vector2(ACTIVE_SIZE, 0.0)
+	mask.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(mask)
+
+	var cd_label := Label.new()
+	cd_label.size = Vector2(ACTIVE_SIZE, ACTIVE_SIZE)
+	cd_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cd_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	cd_label.add_theme_font_size_override("font_size", 26)
+	cd_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.92))
+	cd_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	cd_label.add_theme_constant_override("outline_size", 6)
+	cd_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cd_label.visible = false
+	root.add_child(cd_label)
+
+	# 键位提示：槽下方一行小字（触屏也能点，字仅供键鼠玩家看）。
+	var key := Label.new()
+	key.text = key_text
+	key.position = Vector2(0.0, ACTIVE_SIZE + 2.0)
+	key.size = Vector2(ACTIVE_SIZE, 20.0)
+	key.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	key.add_theme_font_size_override("font_size", 14)
+	key.add_theme_color_override("font_color", Color(0.72, 0.76, 0.86))
+	key.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(key)
+
+	var btn := Button.new()
+	btn.flat = true
+	btn.focus_mode = Control.FOCUS_NONE          # 不抢键盘焦点（空格是发动键，不能变「按下按钮」）
+	btn.size = Vector2(ACTIVE_SIZE, ACTIVE_SIZE)
+	btn.mouse_filter = Control.MOUSE_FILTER_STOP
+	btn.pressed.connect(func(): active_use_requested.emit(slot))
+	root.add_child(btn)
+
+	return {"root": root, "frame": frame, "box": box, "icon": icon, "mask": mask,
+		"cd_label": cd_label, "sig": ""}
+
 
 ## 建一个副武器槽：深色底 + 居中图标 + 底部一排等级点（全部 mouse_filter = IGNORE）。
 ## 槽内布局写死（图标贴顶居中、点贴底居中），槽位尺寸改常量即可整体缩放。
@@ -258,15 +390,24 @@ func set_data(p: Player, wave_num: int, wave_timer: float, max_wave: int) -> voi
 	# 2026-09-21 用户需求：不再显示 30 秒倒计时（「剩余 N 秒」整段移除）——
 	# 每波 30 秒是【生成敌人的时间】，通关条件是清场而不是熬时间，秒数对玩家没有决策价值。
 	# 秒数仍在 wave_timer 里驱动投放窗口，只是不上屏。波次号独占一行、居中。
+	# 无尽战场规则（2026-10-08 第二梯队·无尽 2.0）：波 21+ 波次行常显当前规则名 ——
+	# 玩家随时能看到阵地在变什么。波 ≤20 / 开关关 → 空字典零拼接（旧文案逐字不变）。
+	var rule_tag := ""
+	var rule := GameStats.endless_rule(wave_num)
+	if not rule.is_empty():
+		rule_tag = " · %s" % String(rule["name"])
+	# 每日种子局（2026-10-09 meta 2.0 第二批）：非无尽路径加前缀（daily 与 endless
+	# 由入口保证互斥；真组合时按无尽行渲染，不叠两个标记）。
+	var daily_tag := "每日挑战 · " if GameSession.daily_mode else ""
 	if GameStats.is_boss_wave(wave_num):
 		if GameSession.endless:
-			_wave_label.text = "第 %d 波（无尽）      BOSS" % wave_num
+			_wave_label.text = "第 %d 波（无尽）%s      BOSS" % [wave_num, rule_tag]
 		else:
-			_wave_label.text = "第 %d / %d 波      BOSS" % [wave_num, max_wave]
+			_wave_label.text = "%s第 %d / %d 波      BOSS" % [daily_tag, wave_num, max_wave]
 	elif GameSession.endless:
-		_wave_label.text = "第 %d 波（无尽）" % wave_num
+		_wave_label.text = "第 %d 波（无尽）%s" % [wave_num, rule_tag]
 	else:
-		_wave_label.text = "第 %d / %d 波" % [wave_num, max_wave]
+		_wave_label.text = "%s第 %d / %d 波" % [daily_tag, wave_num, max_wave]
 	_info_label.text = "难度 %s · 等级 %d · 金币 %d" % [
 		GameStats.difficulty_name(), p.level, p.gold]
 	# 武器精通进度：进化前常显（0/6 也显示，做路标）；满 6 层进化后隐藏（另有全屏播报）
@@ -283,6 +424,16 @@ func set_data(p: Player, wave_num: int, wave_timer: float, max_wave: int) -> voi
 		ratio = clampf(p.hp / float(p.max_hp), 0.0, 1.0)
 	_hp_fill.size = Vector2((BAR_W - 4.0) * ratio, BAR_H - 4.0)
 	_hp_text.text = "HP %d / %d" % [ceili(p.hp), p.max_hp]
+	# 低血警告（2026-10-08 旗舰批次）：≤ LOW_HP_WARN_RATIO 进入脉动态（_process 每帧上色），
+	# 恢复即复位常态色。hp ≤ 0（已阵亡）不算 —— 结算面板马上盖上来，脉动没有意义。
+	var low: bool = p.max_hp > 0 and p.hp > 0.0 and ratio <= GameStats.LOW_HP_WARN_RATIO
+	if low != _low_hp:
+		_low_hp = low
+		_pulse_t = 0.0
+		if _danger_label != null:
+			_danger_label.visible = low
+		if not low:
+			_hp_fill.color = LOW_HP_BASE
 	# 经验条：当前经验 / 升级所需（xp_to_next 恒正，守卫仅防意外 0 除）
 	if _xp_fill != null and p.xp_to_next > 0:
 		var xp_ratio := clampf(float(p.xp) / float(p.xp_to_next), 0.0, 1.0)
@@ -350,6 +501,46 @@ func set_extra_weapons(ids: Array[String], levels: Dictionary) -> void:
 			pip.color = EXTRA_PIP_ON if k < lv else EXTRA_PIP_OFF
 
 
+## 主动道具槽刷新（2026-10-08 旗舰批次）。空槽（未装备）→ 整块隐藏。
+## 有槽：id 变化才换图标；遮罩高度/秒数/就绪态每拍直刷（值小，无需指纹）。
+## 所有状态都从 Player 的公开接口读（active_id / active_cd_ratio / active_cd_t）。
+## 主动槽状态刷新（双槽；2026-10-09 meta 2.0 双槽化）：
+## 槽 1 读 active_id / 槽 2 读 active_id_2；各自冷却独立（active_cd_ratio(slot)）。
+## 整函数是「每拍全量重算」—— HUD 拍 0.08s 且槽渲染本身廉价，指纹只管图标切换。
+func set_active_state(p: Player) -> void:
+	if _a_slots.is_empty():
+		return
+	if p == null:
+		for f in _a_slots:
+			(f["root"] as Control).visible = false
+		return
+	_refresh_active_slot(_a_slots[0], p.active_id, p.active_cd_ratio(1), p.active_cd_t)
+	if _a_slots.size() > 1:
+		_refresh_active_slot(_a_slots[1], p.active_id_2, p.active_cd_ratio(2), p.active_cd_t_2)
+
+
+## 刷新单个主动槽（槽 1 / 槽 2 共用）。空 id → 整块隐藏 + sig 复位。
+func _refresh_active_slot(f: Dictionary, id: String, ratio: float, cd_t: float) -> void:
+	var root := f["root"] as Control
+	if id == "":
+		root.visible = false
+		f["sig"] = ""
+		return
+	root.visible = true
+	if id != String(f["sig"]):
+		f["sig"] = id
+		(f["icon"] as TextureRect).texture = AssetDB.item_icon(id)
+	var ready: bool = ratio <= 0.0
+	(f["frame"] as ColorRect).visible = ready
+	(f["box"] as ColorRect).color = ACTIVE_BG_READY if ready else ACTIVE_BG_COOL
+	(f["icon"] as TextureRect).modulate = Color(1, 1, 1, 1) if ready else Color(0.62, 0.62, 0.68, 1)
+	(f["mask"] as ColorRect).size = Vector2(ACTIVE_SIZE, ACTIVE_SIZE * ratio)
+	var cd_label := f["cd_label"] as Label
+	cd_label.visible = not ready
+	if not ready:
+		cd_label.text = "%d" % ceili(cd_t)
+
+
 ## 屏幕中央大字通告（2026-09-20 Boss 狂暴）：显示 dur 秒后自动隐藏。
 ## 重复调用直接覆盖文案并重置计时（同一时刻只有一条通告，后来的优先）。
 func show_center_notice(text: String, dur: float) -> void:
@@ -363,3 +554,8 @@ func _process(delta: float) -> void:
 		_notice_left -= delta
 		if _notice_left <= 0.0:
 			_notice_label.visible = false
+	# 低血脉动（2026-10-08 旗舰批次）：只在低血时每帧跑 —— 常态零开销。
+	# 相位持续累加（不取模）：sin 的周期性不要求相位回绕，省一次取模运算。
+	if _low_hp and _hp_fill != null:
+		_pulse_t += delta * GameStats.LOW_HP_PULSE_SPEED
+		_hp_fill.color = LOW_HP_BASE.lerp(LOW_HP_PEAK, 0.5 + 0.5 * sin(_pulse_t))

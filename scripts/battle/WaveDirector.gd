@@ -44,6 +44,9 @@ var spawn_flushed := false
 var kills_at_wave_start := 0
 ## 逐波观测表：{wave, planned, spawned, kills, hp, level, live_max, spread}
 var wave_log: Array = []
+## 当前已生成障碍物所属的地图 id（多地图系统，2026-10-09 第二梯队）。
+## start_run 首建 / 换图重建都更新它；start_next_wave 靠「id 是否变化」决定要不要重建。
+var _obstacle_map_id := ""
 
 
 ## 注入宿主（Battle）。本模块不反向依赖 Battle 的类型，只按约定读写其字段/方法。
@@ -98,6 +101,20 @@ func killed_count() -> int:
 	return maxi(0, int(_b.kills) - kills_at_wave_start)
 
 
+## 本波【计划投放总数】（含开局诅咒「压境」的加成；空诅咒 == GameStats.spawn_count 逐位一致）。
+## 投放量（start_next_wave）与清场进度分母（wave_clear_ratio）共用本函数 ——
+## 两处口径必须同源，否则进度条会在诅咒局里虚满（分子被放大的击杀撑破分母）。
+func planned_count() -> int:
+	var base: int = GameStats.spawn_count(_b.wave_num)
+	var add := GameStats.curse_bonus("spawn_mul")
+	# 无尽战场规则「规模乘区」（狂潮 ×1.35 / 铁壁 ×0.85，2026-10-08 第二梯队·无尽 2.0）：
+	# 与诅咒同一条链。波 ≤20 / 开关关时恒 1.0 —— 与诅咒同款短路，旧行为逐位不变。
+	var mul := GameStats.endless_rule_mul(_b.wave_num, "spawn_mul")
+	if add == 0.0 and mul == 1.0:
+		return base
+	return int(roundf(float(base) * (1.0 + add) * mul))
+
+
 ## 本波通关进度 0..1 = 已击杀 / 本波计划敌人总数（2026-09-21 二改，用户需求）。
 ##
 ## 旧版「窗口未关恒 0」被用户实测否决：预期是【只要开始击杀，进度条就随之逐渐增长】，
@@ -113,7 +130,7 @@ func killed_count() -> int:
 ## 1.0；因此「条满」不再严格等价「过关」（过关仍是 _wave_cleared() 场上清空）——
 ## 这是「按总数百分比」语义的固有边界，探针 D3/D4 分别锁普通波与 Boss 波。
 func wave_clear_ratio() -> float:
-	var planned: int = GameStats.spawn_count(_b.wave_num)
+	var planned: int = planned_count()
 	if GameStats.is_boss_wave(_b.wave_num):
 		planned += 1   # Boss 占最后一份进度
 	if planned <= 0:
@@ -135,8 +152,9 @@ func start_next_wave() -> void:
 		else:
 			proj.queue_free()
 	_b.projectiles = keep
-	# 本波要投放的总数；实际由 tick_spawn 在 SPAWN_WINDOW 内匀速放出
-	_b.spawn_remaining = GameStats.spawn_count(_b.wave_num)
+	# 本波要投放的总数；实际由 tick_spawn 在 SPAWN_WINDOW 内匀速放出。
+	# 走 planned_count()（含诅咒「压境」加成）—— 与清场进度分母同源。
+	_b.spawn_remaining = planned_count()
 	spawn_accum = 0.0
 	wave_spawn_first = -1.0
 	wave_spawn_last = -1.0
@@ -148,9 +166,38 @@ func start_next_wave() -> void:
 	_b._wave_clear_wait = 0.0
 	var theme: Dictionary = GameStats.floor_theme_for_wave(_b.wave_num)
 	floor_changed.emit(theme)
+	# 多地图（2026-10-09 第二梯队）：换图（每 WAVES_PER_THEME 波）时重建障碍物布局。
+	# 时机安全：上一波已清场（_free_all_enemies 在上方），场上无敌人；
+	# 重建判定用「地图 id 是否变化」——start_run 首建已登记 id，波 1 起不会重复生成。
+	# map_enabled = false（selftest / 探针）时整支跳过 ⇒ 障碍保持开局布局（旧行为）。
+	if GameStats.map_enabled and String(theme["id"]) != _obstacle_map_id:
+		spawn_obstacles()
+	# 新区域中央通知（换图首波且非波 1）：与无尽「新纪元」通知同款呈现；
+	# 波 1 不发（开局横幅已给出图名）。
+	if GameStats.map_enabled and _b.wave_num > 1 \
+			and (_b.wave_num - 1) % GameStats.WAVES_PER_THEME == 0:
+		var region_txt := "新区域 · %s" % String(theme.get("name", ""))
+		var region_eff := String(theme.get("effect_name", ""))
+		if region_eff != "":
+			region_txt += "（%s）" % region_eff
+		_b.hud.show_center_notice(region_txt, 2.5)
 	# Boss 波：开波瞬间额外刷一只 Boss（不占 spawn_count 名额、不受 LIVE_CAP 约束），
 	# 横幅副标题追加「BOSS 来袭」让玩家有准备
 	var banner_sub := String(theme.get("name", ""))
+	# 地图环境机制（2026-10-09 第二梯队）：有机制的地图在主题名后拼短名（陶瓷大厅不拼）。
+	var map_eff_name := GameStats.map_effect_name_for_wave(_b.wave_num)
+	if map_eff_name != "":
+		banner_sub += "  ·  %s" % map_eff_name
+	# 无尽战场规则（2026-10-08 第二梯队·无尽 2.0）：波 21+ 横幅常挂规则名；
+	# 新纪元首波（21/31/41…）加一次中央大字通知 —— 规则切换是本波最重要的信息。
+	# 波 ≤20 / 开关关 → rule 为空字典，零拼接（HUD 基线不漂）。
+	var era := GameStats.endless_era(_b.wave_num)
+	var rule := GameStats.endless_rule(_b.wave_num)
+	if not rule.is_empty():
+		banner_sub += "  ·  %s" % String(rule["name"])
+		if era != GameStats.endless_era(_b.wave_num - 1):
+			_b.hud.show_center_notice("第 %d 纪元 · %s" % [era + 1, String(rule["name"])],
+				2.5)
 	if GameStats.is_boss_wave(_b.wave_num):
 		var boss_pos := get_spawn_pos()
 		if boss_pos.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST * 2.0:
@@ -161,6 +208,17 @@ func start_next_wave() -> void:
 		spawn_enemy(GameStats.boss_type_for_wave(_b.wave_num), boss_pos,
 			GameStats.boss_wave_hp_mul(_b.wave_num))
 		banner_sub += "  ·  BOSS 来袭"
+	elif GameStats.is_sub_boss_wave(_b.wave_num) and GameStats.boss_phase_enabled:
+		# 波 15 小 Boss（2026-10-08 第二梯队）：弱化版 BossPUA —— 凑齐「三招 + 阶段 +
+		# 宝箱」全套 Boss 体验，血量 ×SUBBOSS_HP_MUL（真 Boss 曲线对 15 波太厚）。
+		# 与真 Boss 同口径：不占清场分母、不受 LIVE_CAP 约束、必须打死才过关
+		#（「条满 ≠ 过关」的已有边界语义覆盖它）；宝箱掉落走 behavior=="boss" 既有分支。
+		# boss_phase_enabled = false（selftest / selftest-defeat）时整支跳过，保测试基线。
+		var sb_pos := get_spawn_pos()
+		if sb_pos.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST * 2.0:
+			sb_pos = reserve_pos_around_player()
+		spawn_enemy(GameStats.SUBBOSS_TYPE, sb_pos, GameStats.sub_boss_hp_mul(_b.wave_num))
+		banner_sub += "  ·  强敌来袭"
 	# 精英投放（2026-09-22 词缀系统）：波 ≥5 起每波 1 + wave/8 只，出生时随机 roll 一个词缀。
 	# ⚠️ 不给 Boss 词缀 —— 走上面的分支（affix 参数缺省为空）。
 	spawn_elites()
@@ -179,6 +237,9 @@ func end_wave() -> void:
 	# 波末统一回收解决这个矛盾：波内仍然要走到跟前才捡得起来（拾取范围依然有意义、
 	# 依然值得升级），但不会永久损失。
 	_b.combat.collect_all_pickups()
+	# 局内事件收尾（2026-10-08 第二梯队）：未消费的事件实体清场；进行中的限时挑战按
+	# 当前击杀立即结算（援军此时已被清光，成绩照算）。放在流程分派（宝箱/升级/结算）之前。
+	_b._free_all_events()
 
 	_b.waves_completed += 1
 	# 记录本波的投放跨度：跨度大 = 真的是整波持续出怪，而不是开局一股脑全出。
@@ -203,12 +264,24 @@ func end_wave() -> void:
 	# 即时打印保证「即使没跑完也能读到已经走到的深度与数据」。
 	if _b._testing():
 		wave_logged.emit(row)
+	# 里程碑补给（2026-10-08 第二梯队·无尽 2.0）：波 >20 的 5 倍数波 → 金币（+每 10 波道具）。
+	# ⚠️ 必须在下面宝箱分派【之前】：里程碑排的道具宝箱要搭同一分派链被消化
+	# （波 30/40 与 Boss 波重叠 ⇒ 两箱依次开完再进升级，_chest_on_closed 已有堆积处理）。
+	_b._grant_endless_milestone(_b.wave_num)
 	# 收束：非无尽打满 WAVE_COUNT 即通关结算；无尽真玩时永不结算（跑到阵亡为止），
 	# 只在【自检】下用 ENDLESS_SELFTEST_WAVES 收束，否则自检会跑到引擎超时。
 	var target: int = GameStats.WAVE_COUNT
 	if GameSession.endless:
 		target = GameStats.ENDLESS_SELFTEST_WAVES if bool(_b.selftest) else 0
-	if target > 0 and _b.wave_num >= target:
+	var finishing: bool = target > 0 and _b.wave_num >= target
+	# Boss 宝箱（2026-10-08 玩法增补批次）：波末链优先消化尚未开的宝箱面板 ——
+	# 宝箱 →（选完由 Battle._chest_on_closed 自动接回）升级 → 商店 → 下一波 / 结算。
+	# 为什么在这里：波末的 collect_all_pickups 会把场上宝箱真空回收（此时已无活敌，
+	# Battle 侧刻意不开面板），所以宝箱的统一出口就是这条链。
+	if _b._chest_pending > 0:
+		_b._open_chest_reward("end" if finishing else "wave")
+		return
+	if finishing:
 		_b._end_run(true)
 		return
 	_b._open_upgrade("wave")
@@ -300,7 +373,10 @@ func tick_spawn(delta: float) -> void:
 ##   ② 精英带词缀，需要单独传 affix，波池里的普通怪路径（tick_spawn）不传。
 ## 出生点仍走 get_spawn_pos（可视区外），贴脸则换备用位 —— 与普通怪一致。
 func spawn_elites() -> void:
-	var n := GameStats.elite_count(int(_b.wave_num))
+	# 无尽战场规则「猎场」（2026-10-08 第二梯队·无尽 2.0）：每波额外 N 只精英（增量键，
+	# 缺省 0；波 ≤20 / 开关关时恒 0 —— 与旧行为逐位一致）。
+	var n := GameStats.elite_count(int(_b.wave_num)) \
+		+ GameStats.endless_rule_add(_b.wave_num, "elite_add")
 	for i in n:
 		var pos := get_spawn_pos()
 		if pos.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST:
@@ -320,9 +396,16 @@ func spawn_enemy(type_name: String, pos: Vector2, hp_mul := 1.0, enforce_spawn_d
 		affix := "") -> void:
 	var e: Enemy = ENEMY_SCENE.instantiate()
 	_b.world.add_child(e)
-	# 敌人代价乘区（A1 双向投票的"敌人侧"）：波末取的代价累积到这里，作用于之后生成的每只怪
-	e.setup(type_name, _b.wave_num, pos, _b.enemy_cost_hp_mult() * hp_mul,
-		_b.enemy_cost_dmg_mult(), affix)
+	# 敌人代价乘区（A1 双向投票的"敌人侧"）：波末取的代价累积到这里，作用于之后生成的每只怪。
+	# 开局诅咒（2026-10-08）与它相乘：铁壁（生命）/ 利齿（伤害）—— 与代价同一条乘区链，
+	# 空诅咒时 (1.0 + 0.0) = 1.0，与旧行为逐位一致（自检/探针 curses 恒空）。
+	# 无尽战场规则（2026-10-08 第二梯队·无尽 2.0）同链再乘一档：hp_mul（狂潮/铁壁）与
+	# dmg_mul（血月）—— 波 ≤20 / 开关关时恒 1.0（逐位不变）。
+	e.setup(type_name, _b.wave_num, pos,
+		_b.enemy_cost_hp_mult() * hp_mul * (1.0 + GameStats.curse_bonus("hp_mul"))
+			* GameStats.endless_rule_mul(_b.wave_num, "hp_mul"),
+		_b.enemy_cost_dmg_mult() * (1.0 + GameStats.curse_bonus("dmg_mul"))
+			* GameStats.endless_rule_mul(_b.wave_num, "dmg_mul"), affix)
 	e.target = _b.player
 	e.obstacles = _b.obstacle_rects
 	# 远程怪开火 → Battle 统一生成敌方弹道（melee 怪从不 emit，连接成本为零）
@@ -338,6 +421,8 @@ func spawn_enemy(type_name: String, pos: Vector2, hp_mul := 1.0, enforce_spawn_d
 	e.line_requested.connect(_b._on_enemy_line)
 	# Boss 半血狂暴（2026-09-20）：闪烁由 Enemy 自演，震屏/中央大字交 Battle 转发
 	e.rage_requested.connect(_b._on_boss_rage)
+	# Boss 转阶段（2026-10-08 第二梯队）：属性升级/无敌帧由 Enemy 自演，横幅交 Battle
+	e.boss_phase_changed.connect(_b._on_boss_phase)
 	# 精英词缀死亡效果（2026-09-22）：爆裂（AOE 炸玩家）/ 召唤（掉 2 只小怪）交 Battle 落地
 	e.affix_death_requested.connect(_b._on_affix_death)
 	if e.global_position.distance_to(_b.player.global_position) < GameStats.SPAWN_MIN_DIST \
@@ -380,28 +465,47 @@ func get_spawn_pos() -> Vector2:
 		clampf(p.y, arena.position.y, arena.end.y))
 
 
-## 随机摆放建筑物：避开竞技场边缘、避开玩家出生点周围、彼此不挤在一起。
-## 摆不下就少摆几栋（不无限重试）。随机只影响观感与走位路线，不影响难度对数
-## —— 敌人数量/类型完全由波次决定，与地形无关。
+## 摆放建筑物：规格由【当前波的地图布局】决定（多地图系统，2026-10-09 第二梯队）。
+## 两种模式：
+##   random  —— 随机摆放（参数化 count/min/max）。陶瓷大厅的参数 == 升级前常量，
+##              波 1-4 随机流逐位不变；避开竞技场边缘、避开玩家【当前位置】、
+##              彼此不挤在一起（摆不下就少摆几栋，不无限重试）。
+##              随机只影响观感与走位路线，不影响难度对数 —— 敌人数量/类型完全由波次决定。
+##   corners —— 四角对称柱（固定坐标、零随机）—— 云石回廊的柱廊结构。
+## 本函数内部登记 _obstacle_map_id：start_run 首建与换图重建共用同一入口，
+## start_next_wave 靠它区分「同图不重建 / 换图才重建」。
 func spawn_obstacles() -> void:
 	for o in _b.obstacles:
 		o.queue_free()
 	_b.obstacles.clear()
 	_b.obstacle_rects.clear()
+	var layout: Dictionary = GameStats.map_layout_for_wave(_b.wave_num)
+	_obstacle_map_id = String(GameStats.floor_theme_for_wave(_b.wave_num)["id"])
+	if String(layout.get("mode", "random")) == "corners":
+		_spawn_corner_obstacles(layout)
+		return
+	# ---- random：参数化版旧算法（陶瓷大厅参数 == 旧常量 ⇒ 随机流逐位不变）----
+	var count := int(layout.get("count", GameStats.OBSTACLE_COUNT))
+	var mn: Vector2 = layout.get("min", GameStats.OBSTACLE_MIN_SIZE)
+	var mx: Vector2 = layout.get("max", GameStats.OBSTACLE_MAX_SIZE)
 	var placed: Array[Rect2] = []
 	var tries := 0
-	var max_tries := GameStats.OBSTACLE_COUNT * GameStats.OBSTACLE_PLACE_TRIES
-	while _b.obstacles.size() < GameStats.OBSTACLE_COUNT and tries < max_tries:
+	var max_tries := count * GameStats.OBSTACLE_PLACE_TRIES
+	while _b.obstacles.size() < count and tries < max_tries:
 		tries += 1
 		var size := Vector2(
-			randf_range(GameStats.OBSTACLE_MIN_SIZE.x, GameStats.OBSTACLE_MAX_SIZE.x),
-			randf_range(GameStats.OBSTACLE_MIN_SIZE.y, GameStats.OBSTACLE_MAX_SIZE.y))
+			randf_range(mn.x, mx.x),
+			randf_range(mn.y, mx.y))
 		var m: float = GameStats.OBSTACLE_MARGIN
 		var rect := Rect2(
 			Vector2(randf_range(m, GameStats.ARENA_W - m - size.x),
 				randf_range(m, GameStats.ARENA_H - m - size.y)), size)
-		# 别把玩家开局就关在墙角里
+		# 别把玩家开局就关在墙角里（固定出生点）
 		if rect.get_center().distance_to(GameStats.ARENA_CENTER) < GameStats.OBSTACLE_CLEAR_RADIUS:
+			continue
+		# 换图重建时玩家可能站在竞技场任意位置 —— 别把玩家砌进墙里。
+		# 波 1 生成时玩家在中心（已被上面的 CLEAR 圈排除）⇒ 本检查不触发 ⇒ 随机流不变。
+		if rect.grow(24.0).has_point(_b.player.global_position):
 			continue
 		var ok := true
 		for p in placed:
@@ -411,8 +515,26 @@ func spawn_obstacles() -> void:
 		if not ok:
 			continue
 		placed.append(rect)
-		_b.obstacle_rects.append(rect)
-		var ob: Obstacle = OBSTACLE_SCENE.instantiate()
-		_b.world.add_child(ob)
-		ob.setup(rect)
-		_b.obstacles.append(ob)
+		_place_obstacle(rect)
+
+
+## 四角对称柱（云石回廊）：固定坐标、零随机 —— 结构确定性最强，探针可直接断言坐标。
+## 单柱压住玩家（换图瞬间的极端站位）时跳过该柱（少一根不影响可玩性）。
+func _spawn_corner_obstacles(layout: Dictionary) -> void:
+	var size: Vector2 = layout.get("size", Vector2(110.0, 110.0))
+	var off: float = GameStats.MAP_CORNER_OFFSET
+	for x in [off, GameStats.ARENA_W - off - size.x]:
+		for y in [off, GameStats.ARENA_H - off - size.y]:
+			var rect := Rect2(Vector2(x, y), size)
+			if rect.grow(24.0).has_point(_b.player.global_position):
+				continue
+			_place_obstacle(rect)
+
+
+## 落地一栋建筑物（矩形 → Obstacle 实体 + 矩形表登记）。random / corners 共用。
+func _place_obstacle(rect: Rect2) -> void:
+	_b.obstacle_rects.append(rect)
+	var ob: Obstacle = OBSTACLE_SCENE.instantiate()
+	_b.world.add_child(ob)
+	ob.setup(rect)
+	_b.obstacles.append(ob)

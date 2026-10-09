@@ -44,13 +44,13 @@ func _check_menu_scenes() -> void:
 		var path: String = inst.get_meta("probe_path")
 		var tex_count := _count_texture_rects_with_texture(inst)
 		var bg_ok := _has_loaded_bg(inst)
-		print("  %-30s 背景贴图=%s  有贴图的 TextureRect=%d" % [
+		print("  %-30s 背景贴图=%s  有贴图的背景载体=%d" % [
 			path.get_file(), "OK" if bg_ok else "缺失", tex_count,
 		])
 		if not bg_ok:
 			failures.append("%s 的背景贴图没加载上（AssetDB.bg 取不到？）" % path.get_file())
 		if tex_count <= 0:
-			failures.append("%s 里没有任何 TextureRect 拿到贴图" % path.get_file())
+			failures.append("%s 里没有任何背景载体拿到贴图" % path.get_file())
 		# 按钮皮肤：主题里 Button/normal 应该是 StyleBoxTexture（美术三态图）
 		if inst is Control:
 			var th := (inst as Control).theme
@@ -66,8 +66,14 @@ func _check_menu_scenes() -> void:
 
 
 func _has_loaded_bg(node: Node) -> bool:
+	# 背景载体两种形态（2026-10-09 批量测适配）：
+	#   · TextureRect —— 静态背景（CharSelect / 结算 / 商店 / 标题的贴图缺失回落方案）；
+	#   · Sprite2D    —— 标题三层视差（#15，2026-09-22：ParallaxBackground 下三层精灵）。
+	# 断言语义不变：「场景里确实有加载到贴图的背景载体」。
 	for c in node.get_children():
 		if c is TextureRect and (c as TextureRect).texture != null:
+			return true
+		if c is Sprite2D and (c as Sprite2D).texture != null:
 			return true
 		if _has_loaded_bg(c):
 			return true
@@ -75,9 +81,12 @@ func _has_loaded_bg(node: Node) -> bool:
 
 
 func _count_texture_rects_with_texture(node: Node) -> int:
+	# 同 _has_loaded_bg：TextureRect 与视差 Sprite2D 都算「有贴图的背景载体」。
 	var n := 0
 	for c in node.get_children():
 		if c is TextureRect and (c as TextureRect).texture != null:
+			n += 1
+		elif c is Sprite2D and (c as Sprite2D).texture != null:
 			n += 1
 		n += _count_texture_rects_with_texture(c)
 	return n

@@ -148,6 +148,42 @@ rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (sam
 "%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeCodex.gd > "%P%\_g32_last.txt" 2>&1
 if errorlevel 1 (echo   FAIL ^（详见 _g32_last.txt^） & set FAIL=1) else (echo   ok)
 
+echo [33/33] active items - table / equip+cooldown(cdr) / nuke no-drop + boss 25%% damage / rush / time stop / aura / HUD slot / low-hp / reroll / coupon salvage
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-32)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeActiveItems.gd > "%P%\_g33_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g33_last.txt & set FAIL=1) else (echo   ok)
+echo [34/34] in-run events - altar / black market / challenge pillar / mimic chest (trigger loop / rewards / wave-end cleanup / spawn guard)
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-33)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeEvents.gd > "%P%\_g34_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g34_last.txt & set FAIL=1) else (echo   ok)
+echo [35/35] starting curses - table / bonus pure fn / five muls (hp dmg spd spawn gold) / xp_mul on record_run
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-34)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeCurses.gd > "%P%\_g35_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g35_last.txt & set FAIL=1) else (echo   ok)
+echo [36/36] weapon fusion - 6 recipes / card gate (evolved+max extra) / 6 effects (blade combo whirl thunder freeze missile pool) / discipline
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-35)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeFusions.gd > "%P%\_g36_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g36_last.txt & set FAIL=1) else (echo   ok)
+echo [37/37] boss phases - table(2/3) / threshold advance one-step / iframe absorb+recover / speed-dmg field muls / interval+summon consumers / sub-boss wave15 / selftest switch
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-36)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeBossPhases.gd > "%P%\_g37_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g37_last.txt & set FAIL=1) else (echo   ok)
+echo [38/38] endless 2.0 - rules table(5) / era boundaries / rule rotation+defaults / spawn+hp+dmg+spd+loot+elite muls / milestone gold+chest / none-endless+switch guards
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-37)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeEndless2.gd > "%P%\_g38_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g38_last.txt & set FAIL=1) else (echo   ok)
+echo [39/39] meta 2.0 unlocks - table(2) / purchase atomic+dedupe+unknown-reject / dirty-save filter / session snapshot probe guard / dual active slots (select/cd/use/hud/reset) / weapon cap+override / zero-rand
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-38)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeMetaUnlocks.gd > "%P%\_g39_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g39_last.txt & set FAIL=1) else (echo   ok)
+echo [40/40] meta 2.0b - weapon free (weapon_id 3-state / swap chain / fusion key / projectile) / daily seed (pure fn / guard / same-seed-same-stream) / daily record cross-day / HUD+result / zero-rand
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-39)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeMeta2b.gd > "%P%\_g40_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g40_last.txt & set FAIL=1) else (echo   ok)
+echo [41/41] maps - 5 map table / guard(probe off) / layouts(parametric+corners) / rebuild chain / 4 effects(end-to-end)
+rem  decide by exit code (quit(0/1)) - stdout tail may be truncated on exit (same as gates 9/27-40)
+"%GC%" --headless --path "%P%" --script res://scripts/dev/_ProbeMaps.gd > "%P%\_g41_last.txt" 2>&1
+if errorlevel 1 (echo   FAIL, see _g41_last.txt & set FAIL=1) else (echo   ok)
 echo.
 if %FAIL%==0 (echo ALL GATES PASS) else (echo SOME GATES FAILED)
 exit /b %FAIL%

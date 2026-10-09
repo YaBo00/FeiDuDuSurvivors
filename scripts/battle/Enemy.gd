@@ -55,6 +55,9 @@ signal line_requested(pos: Vector2, text: String)
 ## Boss 半血狂暴（2026-09-20）：身体闪烁由本节点自演（modulate 脉冲），
 ## 震屏 / 屏幕中央大字 / 音效属战场反馈，走信号交 Battle 转发（模块不持 camera/feedback）。
 signal rage_requested(pos: Vector2)
+## Boss 转阶段（2026-10-08 第二梯队）：phase = 新阶段（1 基）/ total / 位置。
+## 属性升级与无敌帧由本节点自演（_advance_boss_phase），横幅 / 震屏交 Battle。
+signal boss_phase_changed(phase: int, total: int, pos: Vector2)
 
 # ---- Boss 特殊技能状态机（2026-09-19 批次三）----
 ## 状态：chase（慢速追击，攒冷却）→ windup（前摇：站住 + 视觉预警）→
@@ -79,6 +82,17 @@ var _boss_active_left := 0.0
 ## 前摇总时长（本招），用于预警进度的归一化。
 var _boss_windup_total := 0.0
 
+# ---- Boss 阶段战（2026-10-08 第二梯队）----
+## 当前阶段（1 基）。非阶段化 Boss / 普通怪恒 1（boss_phases 空 → _boss_phase_total=1）。
+var boss_phase := 1
+## 总阶段数（setup 时按 GameStats.boss_phases(type_name) 定；≤1 = 无阶段行为）。
+var _boss_phase_total := 1
+## 转阶段无敌剩余（秒，>0 吸收全部伤害 —— 演出窗口 + 防连跳）。
+var boss_phase_iframe := 0.0
+## 出招冷却乘区（转阶段 ×0.85）/ 召唤数加成（+1）—— 切换时改一次，消费点动态读。
+var boss_interval_mul := 1.0
+var boss_summon_bonus := 0
+
 # ---- 新敌人行为状态（2026-09-20）----
 ## charger（卷王）：approach → windup（站住闪红锁定方向）→ dash → recover → approach
 var charger_state := "approach"
@@ -94,6 +108,14 @@ var _support_heal_t := 0.0
 ## 多来源取 max 不叠加，到期回 1.0。
 var temp_speed_mul := 1.0
 var _temp_speed_t := 0.0
+## 残局追击标记（2026-10-08 残敌清场加速）：投放窗口关闭后场上只剩最后几只时，
+## Battle 置 true —— 远程怪解除「保持距离」，直冲玩家。移速加成走 apply_temp_speed
+## （刷新式续杯），本标记只负责行为切换（ranged 分支）。setup() 复位，池化复用不带旧值。
+var straggler_hunt := false
+## 核弹击杀压制掉落（2026-10-08 主动道具）：置 true 的怪死亡时不给金/经验/磁铁/商店券
+## （击杀计数、死亡爆裂、击杀台词照常）。**只由核弹的「全屏秒杀」路径设置**；
+## BOSS 不吃秒杀、走正常伤害路径 ⇒ 掉落照常。setup() 复位，池化复用不带旧值。
+var no_drop := false
 ## 台词状态（2026-09-20）：taunt_done = 入场气泡已放过（每只一次）；
 ## died_exploded = 班味炸弹【自爆】死亡（不算被击杀，压制击杀台词）；
 ## _monitor_line_done = 班长首次光环喊话已放过（防 2s 一句刷屏）。
@@ -161,8 +183,29 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	defense = int(t["def"])                       # ← 显式赋值为 0，杜绝 NaN
 	dmg = roundi(float(t["dmg"]) * GameStats.dmg_scale(wave_num) * dmg_cost)
 	speed = GameStats.enemy_speed(p_type)
+	# 开局诅咒「疾风」（2026-10-08 第二梯队）：模板级移速乘区 —— 与精英词缀「疾风」同一层
+	# （写在这行 = 所有消费点自动生效；临时 buff / 副武器减速是运行时乘区，在 _cur_speed() 里
+	# 才相乘，两者互不污染）。空诅咒时乘 1.0，与旧行为逐位一致。
+	var curse_spd := 1.0 + GameStats.curse_bonus("spd_mul")
+	if curse_spd != 1.0:
+		speed *= curse_spd
+	# 地图机制「钢梁重压」（2026-10-09 第二梯队·多地图）：同层再乘一档（模板级写入 ⇒
+	# 所有消费点自动生效）。map_enabled=false / 无 espd 机制的地图 → 1.0 逐位不变。
+	var map_spd := GameStats.map_enemy_mul(wave_num, "espd")
+	if map_spd != 1.0:
+		speed *= map_spd
+	# 无尽战场规则「疾行军」（2026-10-08 第二梯队·无尽 2.0）：同层模板级移速乘区。
+	# 波 ≤20 / 开关关时恒 1.0，与旧行为逐位一致。
+	var rule_spd := GameStats.endless_rule_mul(wave_num, "spd_mul")
+	if rule_spd != 1.0:
+		speed *= rule_spd
 	radius = float(t["radius"])
 	gold = int(t["gold"])
+	# 无尽战场规则「掉落增厚」（疾行军/血月的 loot_mul）：在 gold 落值处乘，xp_value 随其后
+	# 计算 ⇒ 连带生效（规则描述口径 = 「金币与经验掉落」）。波 ≤20 / 开关关恒 1.0。
+	var rule_loot := GameStats.endless_rule_mul(wave_num, "loot_mul")
+	if rule_loot != 1.0:
+		gold = maxi(1, roundi(float(gold) * rule_loot))
 	# 经验 = 金币 × 3（原本 ×2）。实测 20 波只升到 8 级，成长感太弱 ——
 	# 在商店做出来之前，升级是玩家唯一的成长途径，必须给够。
 	xp_value = gold * GameStats.XP_PER_GOLD
@@ -189,7 +232,14 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	behavior = String(t.get("behavior", "melee"))
 	# Boss 技能状态机复位（复用实例/重复 setup 都不会把旧状态带进来）。
 	# 首招等一个完整间隔 —— 行为可预期，玩家进场先热身。
-	_boss_cooldown = GameStats.BOSS_SKILL_INTERVAL
+	# 阶段战初始化（2026-10-08）：按类型查阶段表；未登记的怪 total=1（无阶段行为）。
+	# ⚠️ 必须在 _boss_cooldown 之前 —— 它乘 boss_interval_mul，先算会读到未重置的旧值。
+	boss_phase = 1
+	_boss_phase_total = maxi(1, GameStats.boss_phases(type_name).size())
+	boss_phase_iframe = 0.0
+	boss_interval_mul = 1.0
+	boss_summon_bonus = 0
+	_boss_cooldown = GameStats.BOSS_SKILL_INTERVAL * boss_interval_mul
 	boss_skill_state = "chase"
 	boss_skill_index = 0
 	boss_skill_name = ""
@@ -207,6 +257,8 @@ func setup(p_type: String, wave_num: int, pos: Vector2, hp_cost := 1.0, dmg_cost
 	_support_heal_t = GameStats.SUPPORT_HEAL_INTERVAL
 	temp_speed_mul = 1.0
 	_temp_speed_t = 0.0
+	straggler_hunt = false
+	no_drop = false
 	taunt_done = false
 	died_exploded = false
 	_monitor_line_done = false
@@ -317,6 +369,10 @@ func _physics_process(delta: float) -> void:
 		_temp_speed_t = maxf(0.0, _temp_speed_t - delta)
 		if _temp_speed_t <= 0.0:
 			temp_speed_mul = 1.0
+	# 转阶段无敌计时（2026-10-08 第二梯队）：只由 delta 推进（探针可手动步进）。
+	# 刻意放在冻结判定【之前】—— 无敌是演出窗口，不因被冻结而延长。
+	if boss_phase_iframe > 0.0:
+		boss_phase_iframe = maxf(0.0, boss_phase_iframe - delta)
 	# ---- 副武器减益推进（2026-09-22）----
 	# ⚠️ 放在 target 判空【之前】：没有目标时减益计时照走，否则冻结中的怪一旦失去目标
 	# （换波清场 / 目标失效）就会留下永不消退的冰蓝视觉。
@@ -347,11 +403,23 @@ func _physics_process(delta: float) -> void:
 	if d <= 0.001:
 		return
 
+	# 移动前位置（竞技场边界收口用，见本函数末尾 clamp 段）
+	var pos_before := global_position
+
 	match behavior:
 		"ranged":
 			# 远程怪：保持距离区间，不贴脸
 			var move_dir := Vector2.ZERO
-			if d < GameStats.RANGED_KEEP_MIN:
+			if straggler_hunt:
+				# 残局追击（2026-10-08）：无视保持距离，直冲玩家 —— 「最后几只远程
+				# 悬停在射程外」是清场变慢的主要来源之一，残局里必须收掉这个行为。
+				move_dir = to_target / d
+			elif not _inside_arena(global_position):
+				# 场外一律靠近（2026-10-09 收网修复）：场外没有「保距悬停」的权利 ——
+				# 悬停在场外的 Ranged 玩家永远够不着（玩家被墙钳在场内、d>射程不开火），
+				# 清场死锁（实测波 17：玩家钉死 (2542,18)、5 只 Ranged 悬停 261~380）。
+				move_dir = to_target / d
+			elif d < GameStats.RANGED_KEEP_MIN:
 				move_dir = -to_target / d   # 太近了 → 后退
 			elif d > GameStats.RANGED_KEEP_MAX:
 				move_dir = to_target / d    # 太远了 → 靠近
@@ -376,7 +444,27 @@ func _physics_process(delta: float) -> void:
 		_:
 			# 近战（含 splitter 精神内耗）：直线追击
 			global_position += to_target / d * _cur_speed() * delta
+	# 竞技场边界收口（2026-10-09 批量测修复）：远程怪「保距后退」可以把敌人推出
+	# 场地（实测：Ranged 停在 y=1683，场外 243px）—— 玩家被 _clamp_to_arena 挡在
+	# 界内、永远追不到，又因 d > attack_range 不开火 ⇒ 清场死锁（波 9/11/12 超时 FAIL）。
+	# 规则 = 「原位置在场内 → 移动后钳回边界内」（身体不出界）；出生在屏外的敌人
+	# （进场途中原位置就在场外）不受限制 —— 「屏外出生 → 走进场」路径逐位不变。
+	# ⚠️ 配套纪律：场外敌人必须【一律向玩家靠近】（见 ranged / support 分脑的
+	# `not _inside_arena` 分支）——否则「场外悬停」照样发生，本收口形同虚设
+	# （2026-10-09 收网第二修：Ranged 场外 261~380 悬停 × 玩家钉死角 ⇒ 波 17 死锁）。
+	if _inside_arena(pos_before):
+		global_position.x = clampf(global_position.x, radius, GameStats.ARENA_W - radius)
+		global_position.y = clampf(global_position.y, radius, GameStats.ARENA_H - radius)
 	global_position = _resolve_obstacles(global_position)
+
+
+## 位置是否落在竞技场矩形内（含边界）。边界收口与「保距型分脑」（ranged / support）
+## 共用同一个判定 —— 语义必须一致：场外敌人不受「身体不出界」钳制（屏外出生走进场
+## 的路径），因此更要禁止它在场外悬停/后退，否则玩家被墙挡住永远够不着（2026-10-09
+## 收网修复：Ranged 场外悬停 × 玩家钉墙角 ⇒ 波 17 清场死锁）。
+static func _inside_arena(p: Vector2) -> bool:
+	return p.x >= 0.0 and p.x <= GameStats.ARENA_W \
+		and p.y >= 0.0 and p.y <= GameStats.ARENA_H
 
 
 ## 当前实际移速 = 模板速度 × 临时加速乘区（光环/群体 PUA）× 减速乘区（副武器）。
@@ -497,7 +585,7 @@ func _boss_brain(delta: float, to_target: Vector2, d: float) -> void:
 			if _boss_active_left <= 0.0:
 				boss_skill_state = "chase"
 				boss_skill_name = ""
-				_boss_cooldown = GameStats.BOSS_SKILL_INTERVAL
+				_boss_cooldown = GameStats.BOSS_SKILL_INTERVAL * boss_interval_mul
 				queue_redraw()
 
 
@@ -539,7 +627,8 @@ func _start_active(to_target: Vector2, d: float) -> void:
 			# 未覆盖时回落全局 BOSS_SUMMON_TYPE/COUNT —— 第 20 波袋鼠王行为逐位不变。
 			var t := GameStats.enemy_template(type_name)
 			var st := String(t.get("summon_type", String(GameStats.BOSS_SUMMON_TYPE)))
-			var sc := int(t.get("summon_count", int(GameStats.BOSS_SUMMON_COUNT)))
+			# 阶段加成（2026-10-08）：每次转阶段 +1 只（P3 的袋鼠王 = 模板数 + 2）。
+			var sc := int(t.get("summon_count", int(GameStats.BOSS_SUMMON_COUNT))) + boss_summon_bonus
 			summon_requested.emit(global_position, st, sc)
 			if t.has("summon_aura"):
 				var a: Array = t["summon_aura"]
@@ -568,6 +657,22 @@ func _finish_active() -> void:
 	boss_skill_state = "recover"
 	_boss_active_left = float(GameStats.BOSS_SKILL_RECOVER)
 	boss_skill_index = (boss_skill_index + 1) % maxi(1, GameStats.BOSS_SKILL_ORDER.size())
+	queue_redraw()
+
+
+## 转阶段（2026-10-08 第二梯队）：属性升级 + 无敌帧 + 红色脉冲 + 信号。
+## speed / dmg 直接乘【字段】（同「狂怒」精英词缀纪律：contact 伤害 / 弹道 / 索敌等
+## 全部消费点自动生效、不会漏）；interval / summon 改字段由消费点动态读。
+## 演出通道复用狂暴的 _rage_flash_t（红色脉冲）—— 与 50% 狂暴同帧时二者叠加写入，幂等。
+func _advance_boss_phase() -> void:
+	boss_phase += 1
+	speed = maxf(1.0, speed * float(GameStats.BOSS_PHASE_STEP["speed"]))
+	dmg = maxi(1, roundi(float(dmg) * float(GameStats.BOSS_PHASE_STEP["dmg"])))
+	boss_interval_mul *= float(GameStats.BOSS_PHASE_STEP["interval"])
+	boss_summon_bonus += int(GameStats.BOSS_PHASE_STEP["summon"])
+	boss_phase_iframe = GameStats.BOSS_PHASE_IFRAME
+	_rage_flash_t = GameStats.BOSS_RAGE_FLASH_TIME
+	boss_phase_changed.emit(boss_phase, _boss_phase_total, global_position)
 	queue_redraw()
 
 
@@ -661,9 +766,18 @@ func _bomber_brain(delta: float, to_target: Vector2, d: float) -> void:
 
 ## 班长（support）：不追玩家，与玩家保持 250~350px 距离缓慢游荡；每 2s / 4s 发出
 ## 提速 / 治疗脉冲（半径过滤、目标选择、实际施加都在 Battle 侧）。
+## 残局追击（2026-10-09 批量测修复）：straggler_hunt 时与 ranged 同一纪律 ——
+## 「最后几只悬停在射程外」必须收掉。旧版只有 ranged 分支有直冲 ⇒ 波 12 残局
+## 最后 1 只 Monitor 保距游荡（265px ≈ 射程边界），玩家贴边抖动打不中，卡死 2400s。
 func _support_brain(delta: float, to_target: Vector2, d: float) -> void:
 	var move_dir := Vector2.ZERO
-	if d < GameStats.SUPPORT_WANDER_MIN:
+	if straggler_hunt:
+		move_dir = to_target / d
+	elif not _inside_arena(global_position):
+		# 场外一律靠近（2026-10-09 收网修复）：同 Ranged —— 场外切向游荡同样可能
+		# 长期停在界外（玩家被墙钳住够不着），清场死锁的同族形态。
+		move_dir = to_target / d
+	elif d < GameStats.SUPPORT_WANDER_MIN:
 		move_dir = -to_target / d
 	elif d > GameStats.SUPPORT_WANDER_MAX:
 		move_dir = to_target / d
@@ -736,6 +850,10 @@ func take_damage(amount: int) -> bool:
 	# 这里再兜一层：非法（<=0）输入直接忽略，绝不写入 hp，从根部杜绝 NaN 血条。
 	if amount <= 0:
 		return false
+	# 转阶段无敌（2026-10-08 第二梯队）：吸收全部伤害 —— 演出窗口 + 防止一记大伤害
+	# 把两个阶段连起来跳（0.7s 内打不出第二段，跨档溢出的下一击才会推下一阶段）。
+	if boss_phase_iframe > 0.0:
+		return false
 	# 钢甲词缀（2026-09-22）：受击伤害乘区在【唯一伤害入口】收口 —— 弹道 / 溅射 /
 	# 副武器 / 反甲反弹全部自动吃到减伤，各来源不需要知道词缀的存在。
 	# 至少留 1 点：减伤归减伤，不能让「打不动 = 永远打不死」这种情况成立。
@@ -750,6 +868,13 @@ func take_damage(amount: int) -> bool:
 		_rage_triggered = true
 		_rage_flash_t = GameStats.BOSS_RAGE_FLASH_TIME
 		rage_requested.emit(global_position)
+	# 阶段推进（2026-10-08 第二梯队）：hp 首次跌破下一档阈值 → 推进一阶段。
+	# hp > 0 与狂暴同条件（濒死一击不推进 —— 都死了谈不上转阶段）；
+	# 用 if 不是 while：跨两档的溢出伤害留给下一击（同帧双阶段演出会叠）。
+	if behavior == "boss" and hp > 0 and GameStats.boss_phase_enabled:
+		var phases := GameStats.boss_phases(type_name)
+		if boss_phase < phases.size() and hp_ratio() <= float(phases[boss_phase]):
+			_advance_boss_phase()
 	# 精灵态时 _draw 第一行就 return，重绘是纯浪费（对照 Player / Pickup 的守卫）
 	# 有头顶血条的（精英/Boss）即使走精灵渲染也要重绘，血条才会动
 	if not _use_sprite or show_health_bar:
@@ -785,6 +910,14 @@ func _draw() -> void:
 		draw_rect(Rect2(bar.position, Vector2(w * hp_ratio(), 5.0)),
 			Color(0.95, 0.26, 0.24), true)
 		draw_rect(bar, Color(1, 1, 1, 0.4), false, 1.0)
+		# 阶段刻度（2026-10-08 第二梯队）：在血条上标出各转阶段阈值（不含起点 1.0），
+		# 让玩家「看得见下一阶段还剩多少血」。纯表现层 —— 只读 GameStats.boss_phases，
+		# 无阶段 Boss / 精英 → 空表 → 零绘制（逐像素不变）。
+		var phases := GameStats.boss_phases(type_name)
+		for k in range(1, phases.size()):
+			var tx := bar.position.x + w * float(phases[k])
+			draw_line(Vector2(tx, top), Vector2(tx, top + 5.0),
+				Color(1.0, 0.85, 0.30, 0.9), 1.0)
 	# Boss 前摇预警：让玩家「看得见要来了 / 往哪个方向」。
 	# ⚠️ 必须放在 _use_sprite 提前 return 之前 —— Boss 走精灵渲染，预警画在这才显示得出来。
 	if behavior == "boss" and boss_skill_state == "windup":

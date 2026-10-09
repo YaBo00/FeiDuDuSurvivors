@@ -49,6 +49,11 @@ var magnet_all_t := 0.0
 var weapon_level := 0
 var weapon_evolved := false
 
+## 武器融合 id（2026-10-08 第二梯队）：= char_id（配方 key），空串 = 未融合。
+## 融合与第二形态叠加；效果执行在 ExtraWeaponSystem（读本字段分发），
+## 生成条件（已进化 + 副武器满级）与卡面在 Battle._generate_options。
+var fusion_id := ""
+
 
 ## 武器进化后的出膛伤害乘区（未进化恒 1.0 —— 挂在 on_player_fired 的伤害公式尾）。
 func weapon_damage_mul() -> float:
@@ -57,10 +62,20 @@ func weapon_damage_mul() -> float:
 
 ## 武器第二形态定义（2026-09-20）：进化后返回形态特性表，未进化返回空字典
 ## —— 消费方全部用 form.get(key, 默认值) 读，空字典 = 与旧基线逐位一致。
+## 武器线（2026-10-09 meta 2.0）：形态键取 weapon_id() —— 「武器自由」替换后
+## 进化形态跟着替换武器走（角色特性/属性不受影响，那是角色线）。
 func weapon_form() -> Dictionary:
 	if not weapon_evolved:
 		return {}
-	return GameStats.weapon_evolution(char_id)
+	return GameStats.weapon_evolution(weapon_id())
+
+
+## 本局主武器 id（2026-10-09 meta 2.0 第二批·武器自由）—— **武器线的唯一读取口**：
+## 弹道形态（CombatResolver）、进化形态（weapon_form）、融合配方（Battle._fusion_card）、
+## 武器摘要（CharSelect / 构筑一览）全部读这里，不允许再直读 char_id 当武器键。
+## 判定收口在 GameStats.effective_weapon（weapon_pick 合法则覆盖，否则 char_id）。
+func weapon_id() -> String:
+	return GameStats.effective_weapon(char_id)
 
 ## 观测模式：不受任何伤害。**只用于平衡观测（`--balance`），正常游玩永远为 false。**
 ## 目的：让自动驾驶跑满 20 波，好把后半段的压力曲线看全 —— 否则死在第 5 波，
@@ -126,6 +141,27 @@ var shop_discount := 1.0
 ## 而不是「派生属性」，放进幂等重算会被下一次 recalc 抹掉。
 var shop_coupon := 0
 
+# ---- 主动道具（2026-10-08 旗舰批次；2026-10-09 meta 2.0 双槽化）----
+## 槽 1（空格）。"" = 空槽；装备/冷却状态住这里（局内资源，reset() 清零）；
+## **效果执行在 Battle**（它才持 enemies）。
+var active_id := ""
+## 槽 1 冷却剩余秒数（发动成功时置值，吃 cdr 乘区）。
+var active_cd_t := 0.0
+## 槽 2（F 键，需解锁 unlock_active_2；2026-10-09 meta 2.0）。语义与槽 1 完全同构。
+## 「是否允许用槽 2」的解锁判定在【调用方】（apply_item 选槽 / 输入 / HUD），
+## 本类不读解锁 —— 保持纯状态容器（探针可直接 equip_active(id, 2) 做确定性测试）。
+var active_id_2 := ""
+var active_cd_t_2 := 0.0
+## 电动车冲刺剩余时间 / 移速乘区（运行时乘区，与 money_speed_mul 同构，绝不写进 _bonus）。
+var active_rush_t := 0.0
+var active_rush_mul := 1.0
+## 忧郁光环减速比例（0 = 无；0.25 = 光环内敌人移速 -25%）。Battle 每拍读取施加。
+var slow_aura := 0.0
+## 商店稀有度权重偏移（幸运护符；0 = 不变）。Battle 开店时透传给 shop_roll。
+var rarity_luck := 0.0
+## 本局剩余升级「重抽」次数（UpgradePanel 按钮消费；reset 置为 GameStats.UPGRADE_REROLLS）。
+var rerolls_left := 0
+
 # ---- 2026-09-20 扩充新增：护盾 / 反甲 / 弹速 / 拾取倍率 / 额外选项 / 复活币 ----
 ## 当前护盾吸收值（受击时先扣盾再扣血）。上限 shield_cap，脱战回充。
 var shield: float = 0.0
@@ -147,6 +183,10 @@ var pickup_mul_run: float = 1.0
 var extra_card_pending: int = 0
 ## 复活币剩余次数（致死时消耗 1 次原地复活）。
 var resurrect_charges: int = 0
+## 地图环境机制快照（2026-10-09 第二梯队·多地图）：Battle 换图时写入（来源 = 主题表
+## 的 effect 字段），消费点经 map_mul(key) 乘 1.0 + effect[key]。
+## 空字典 = 全 1.0 —— selftest / 探针 / 波 1-4（陶瓷大厅无机制）旧行为逐位不变。
+var map_effects: Dictionary = {}
 
 # ---------------------------------------------------------------- 运行时
 var invincible_timer: float = 0.0
@@ -221,7 +261,7 @@ func apply_character(id: String) -> void:
 	_base = (c["base"] as Dictionary).duplicate()
 	_xp_mul = float(c["xp_mul"])
 	trait_id = GameStats.trait_id_for_char(char_id)
-	_weapon = GameStats.weapon_for_char(char_id)
+	_weapon = GameStats.weapon_for_char(weapon_id())
 	# 见钱眼开：商店永久 9 折（与「投资手册 0.82」乘法叠加 → 0.738）。其余角色 1.0。
 	shop_discount = GameStats.TRAIT_SHOP_DISCOUNT_FINANCE \
 		if trait_id == "money_rush" else 1.0
@@ -276,6 +316,19 @@ func reset(pos: Vector2) -> void:
 	magnet_all_t = 0.0
 	# 商店券每局清零（精英词缀掉落，不能继承到下一局）
 	shop_coupon = 0
+	# 主动道具 / 新道具运行态每局清零（2026-10-08 旗舰批次；双槽 2026-10-09）
+	active_id = ""
+	active_cd_t = 0.0
+	active_id_2 = ""
+	active_cd_t_2 = 0.0
+	active_rush_t = 0.0
+	active_rush_mul = 1.0
+	slow_aura = 0.0
+	rarity_luck = 0.0
+	rerolls_left = GameStats.UPGRADE_REROLLS
+	# 地图环境机制快照清零（2026-10-09 第二梯队·多地图）—— 由随后的换图
+	# floor_changed（start_run → start_next_wave → 波 1 陶瓷）重新写入。
+	map_effects = {}
 	# 2026-09-20 扩充新增字段每局清零（thorns/cdr/proj_speed_mul 由 _bonus 派生，已随上面清零）
 	shield = 0.0
 	shield_cap = 0.0
@@ -289,6 +342,8 @@ func reset(pos: Vector2) -> void:
 	# 武器进化状态清零（B2 迭代：weapon_mastery 层数与进化标记每局重置）
 	weapon_level = 0
 	weapon_evolved = false
+	# 武器融合清零（2026-10-08 第二梯队）：重开一局不继承融合（需重新凑条件）。
+	fusion_id = ""
 	level = GameStats.START_LEVEL
 	xp = GameStats.START_XP
 	xp_to_next = roundi(GameStats.START_XP_TO_NEXT * _xp_mul)
@@ -404,8 +459,9 @@ func apply_upgrade(id: String, value: float) -> void:
 			if weapon_level >= GameStats.WEAPON_EVOLVE_LEVEL and not weapon_evolved:
 				weapon_evolved = true
 				recalc_stats()   # 形态特性可能带 rate_add（攻速倍率）→ 立刻刷新攻击间隔
-				# 进化播报（2026-09-20）：Battle 监听后做全屏演出
-				evolved.emit(String(GameStats.weapon_evolution(char_id).get("name", "")))
+				# 进化播报（2026-09-20）：Battle 监听后做全屏演出。
+				# 形态名按 weapon_id()（武器自由替换后跟着替换武器走）。
+				evolved.emit(String(GameStats.weapon_evolution(weapon_id()).get("name", "")))
 				return
 		_:
 			push_warning("未知升级 id：%s" % id)
@@ -525,6 +581,66 @@ func kanga_aspd_mul() -> float:
 	return 1.0 + GameStats.TRAIT_KANGA_ASPD_STEP * float(_kanga_stacks)
 
 
+# ---------------------------------------------------------------- 主动道具（2026-10-08 旗舰批次）
+## 装备主动道具到指定槽（slot 1 缺省 = 旧行为）。商店购买入口 = apply_item 的
+## "active_item" 分支（它负责按解锁状态选槽）；买新的直接替换该槽的旧道具 +
+## 冷却清零（「刚买的技能不能用」像 bug）。未知 id 拒绝。
+func equip_active(id: String, slot := 1) -> void:
+	if not GameStats.ACTIVE_ITEMS.has(id):
+		push_warning("Player: 未知主动道具 id：%s" % id)
+		return
+	if slot == 2:
+		active_id_2 = id
+		active_cd_t_2 = 0.0
+	else:
+		active_id = id
+		active_cd_t = 0.0
+	stats_changed.emit()
+
+
+## 指定槽是否就绪（空槽恒 false）。slot 1 缺省 ⇒ 旧调用逐位不变。
+func active_ready(slot := 1) -> bool:
+	if slot == 2:
+		return active_id_2 != "" and active_cd_t_2 <= 0.0
+	return active_id != "" and active_cd_t <= 0.0
+
+
+## 指定槽冷却进度 0..1（1 = 刚发动，0 = 就绪）。HUD 冷却遮罩读它；空槽返回 0。
+func active_cd_ratio(slot := 1) -> float:
+	var id: String = active_id_2 if slot == 2 else active_id
+	if id == "":
+		return 0.0
+	var cd: float = active_cd_t_2 if slot == 2 else active_cd_t
+	var base := GameStats.active_cooldown(id)
+	if base <= 0.0:
+		return 0.0
+	return clampf(cd / base, 0.0, 1.0)
+
+
+## 指定槽进入冷却（发动成功后由 Battle 调用）。**cdr 的唯一消费点**：cd = base × (1 - cdr)。
+func active_start_cooldown(slot := 1) -> void:
+	if slot == 2:
+		if active_id_2 == "":
+			return
+		active_cd_t_2 = GameStats.active_cooldown(active_id_2) * (1.0 - cdr)
+		return
+	if active_id == "":
+		return
+	active_cd_t = GameStats.active_cooldown(active_id) * (1.0 - cdr)
+
+
+## 电动车冲刺：限时无敌 + 移速乘区。发动时由 Battle 调用（时长/倍率参数在 ACTIVE_ITEMS）。
+func start_active_rush(dur: float, mul: float) -> void:
+	active_rush_t = maxf(active_rush_t, dur)
+	active_rush_mul = maxf(active_rush_mul, mul)
+	invincible_timer = maxf(invincible_timer, dur)   # 原始规格：冲刺期间无敌
+
+
+## 冲刺移速乘区（运行时乘区，与 money_speed_mul 同构；未冲刺恒 1.0）。
+func active_rush_speed_mul() -> float:
+	return active_rush_mul if active_rush_t > 0.0 else 1.0
+
+
 ## 停不下来：按输入方向（_movement_dir 非零）判定移动中/静止，更新叠层。
 ## 移动中：停止计时清零、移动计时累加，每满 TRAIT_KANGA_STACK_TIME 叠 1 层并扣回；
 ## 静止中：移动计时清零、停止计时累加，满 TRAIT_KANGA_STOP_CLEAR 清零层数。
@@ -592,6 +708,22 @@ func apply_item(item_id: String) -> void:
 				extra_card_pending += int(v)
 			"reroll":
 				pass                           # 跨模块效果：由 Battle 购买回调刷新商店
+			# ---- 2026-10-08 旗舰批次：主动道具 / 忧郁光环 / 幸运护符 ----
+			"active_item":
+				# 装备到主动槽。作用于 item_id 而不是效果值 —— 效果值只是「这是主动道具」的标记；
+				# 替换/冷却清零语义全部收口在 equip_active（单一入口，商店与将来别的来源共用）。
+				# 选槽规则（2026-10-09 meta 2.0 双槽）：
+				#   槽 1 空 → 槽 1；槽 1 有 + 槽 2 已解锁且空 → 槽 2；否则 → 替换槽 1
+				#  （FIFO：与单槽时代「买新的挤掉旧的」直觉一致）。
+				var aslot := 1
+				if active_id != "" and active_id_2 == "" \
+						and GameSession.has_unlock("unlock_active_2"):
+					aslot = 2
+				equip_active(item_id, aslot)
+			"slow_aura":
+				slow_aura = minf(0.5, slow_aura + v)   # 光环减速比例，封顶 50%
+			"rarity_luck":
+				rarity_luck += v
 			_:
 				_bonus[key] += v
 	recalc_stats()
@@ -649,6 +781,14 @@ func gain_xp(amount: int) -> int:
 	return gained
 
 
+## 地图环境机制乘区（2026-10-09 第二梯队·多地图）：1.0 + map_effects[key]。
+## 空字典 / 键缺失 → 1.0（旧行为逐位）。移速 / 拾取 / 金币三个消费点共用。
+func map_mul(key: String) -> float:
+	if not map_effects.has(key):
+		return 1.0
+	return 1.0 + float(map_effects[key])
+
+
 func add_gold(amount: int) -> void:
 	if amount <= 0:
 		return
@@ -659,6 +799,16 @@ func add_gold(amount: int) -> void:
 	var m_gold: float = float(meta_bonus_dict.get("gold_mul", 0.0))
 	if m_gold > 0.0:
 		amount = maxi(1, roundi(float(amount) * (1.0 + m_gold)))
+	# 开局诅咒「萧条」（2026-10-08 第二梯队）：金币收益乘区，同样收口在入账点 ——
+	# 与 meta 财富强化同一条链（先乘 meta 加成、再乘诅咒减成）。空诅咒 = 1.0 逐位不变。
+	var c_gold := GameStats.curse_bonus("gold_mul")
+	if c_gold != 0.0:
+		amount = maxi(1, roundi(float(amount) * (1.0 + c_gold)))
+	# 地图机制「遍地鎏金」（2026-10-09 第二梯队·多地图）：入账链的第三乘区。
+	# 空快照（selftest / 探针 / 波 1-4）= 1.0 逐位不变。
+	var map_gold := map_mul("gold")
+	if map_gold != 1.0:
+		amount = maxi(1, roundi(float(amount) * map_gold))
 	gold += amount
 	# 【见钱眼开】每次进账 +1 层（封顶 3 层），并刷新持续时长。
 	# 捡第 4 枚只刷新时长、不再加层。波末自动回收是逐枚 _collect → 逐枚触发，
@@ -689,6 +839,16 @@ func _physics_process(delta: float) -> void:
 	# 全场磁吸倒计时（磁铁掉落）：归零后掉落物回到拾取范围驱动的普通磁吸
 	if magnet_all_t > 0.0:
 		magnet_all_t = maxf(0.0, magnet_all_t - delta)
+	# 主动道具冷却 / 冲刺计时（2026-10-08 旗舰批次）：与磁吸同款「面板暂停即冻结」。
+	# 双槽冷却各自独立递减（2026-10-09 meta 2.0）。
+	if active_cd_t > 0.0:
+		active_cd_t = maxf(0.0, active_cd_t - delta)
+	if active_cd_t_2 > 0.0:
+		active_cd_t_2 = maxf(0.0, active_cd_t_2 - delta)
+	if active_rush_t > 0.0:
+		active_rush_t = maxf(0.0, active_rush_t - delta)
+		if active_rush_t <= 0.0:
+			active_rush_mul = 1.0
 	# 护盾脱战回充（2026-09-20 扩充）：静置 SHIELD_REGEN_DELAY 秒回一层（层值 = cap/层数）
 	if shield_charges_max > 0 and shield < shield_cap:
 		shield_regen_t += delta
@@ -705,9 +865,11 @@ func _physics_process(delta: float) -> void:
 	# 【停不下来】按输入方向判定移动/静止并更新叠层（贴墙也算移动，见设计文档 §5）
 	_tick_move_stacks(delta, dir)
 	# 加速度：朝目标速度指数趋近（帧率无关）。松手减速更快，跟手但不生硬。
-	# money_speed_mul() / kanga_speed_mul() 是运行时乘区（见钱眼开 / 停不下来），
-	# 对非对应角色恒为 1.0。
-	var target := dir * spd * money_speed_mul() * kanga_speed_mul()
+	# money_speed_mul() / kanga_speed_mul() / active_rush_speed_mul() / map_mul("speed")
+	# 是运行时乘区（见钱眼开 / 停不下来 / 电动车冲刺 / 地图机制「车间疾走」），
+	# 不满足条件时恒为 1.0。
+	var target := dir * spd * money_speed_mul() * kanga_speed_mul() \
+		* active_rush_speed_mul() * map_mul("speed")
 	var rate := GameStats.PLAYER_ACCEL if dir.length_squared() > 0.0 else GameStats.PLAYER_DECEL
 	velocity = velocity.lerp(target, 1.0 - exp(-rate * delta))
 	move_and_slide()
@@ -776,7 +938,11 @@ const LOOT_SEEK_DIST := 250.0   # 最近敌人距此以外，才敢绕路捡东�
 const LOOT_PULL_DIST := 170.0   # 掉落物距此以内才值得绕路
 const LOOT_WEIGHT := 0.45       # 捡东西只做「偏航」，主方向仍然是躲避
 const AVOID_OBSTACLE_DIST := 150.0   # 距建筑物小于此距离就开始绕开
-## 残敌追击的触发判据（2026-09-21）。
+## autopilot「逃」阈值（2026-10-09 批量测修复）：被贴身到 ≤ 半射程才逃，其余推进。
+## 详见 _compute_autopilot_dir 上方判据注释；仅影响自动驾驶，真人输入零影响。
+const AUTOPILOT_FLEE_RATIO := 0.5
+## 自动驾驶「追 / 逃」判据（2026-09-21 立项；2026-10-09 批量测修正。
+## 配合旧 closest_point bug 修复：此前本段决策从未真正运行过，见 Player.gd 修复批注释）。
 ##
 ## 为什么必须有追击 ——「清场制」暴露的死锁：
 ## 远程怪（Stats.RANGED_KEEP_MIN/MAX = 260~380）会站定在玩家射程（ATTACK_RANGE_BASE=230）
@@ -784,21 +950,17 @@ const AVOID_OBSTACLE_DIST := 150.0   # 距建筑物小于此距离就开始绕�
 ## 距离只增不减，两边永久互不伤害。远程怪恰好从第 8 波入池，实测清场阶段
 ## 从波 8 起冻结在固定只数长达 300+ 秒不动，20 波必然跑不完自检上限。
 ##
-## 判据用【射程内有没有目标】，而不是【场上还剩几只】（2026-09-21 二调）：
-## 首版按「场上 ≤8 只」触发，结果波 9 在【13 只】处照样冻结 —— 数量阈值永远追不上
-## 真实的残局规模。而「射程内无目标」是空间性判据，与剩多少只无关，从定义上
-## 覆盖所有「打不到人」的僵局。
-##
-## 为什么不破坏难度曲线：只要射程内有任何一只怪，玩家就照旧逃跑/风筝（行为逐位不变）
-## —— 而这正是怪群战（波末同屏 40~78 只）的常态，此时总有目标在射程内。
-## 只有「一只都打不到」时才转为逼近，而那只可能是清场期的残敌。
-##
-## 为什么【不加】迟滞带（2026-09-21 三调，推翻上一版）：
-## 曾给追击启动加 40px 迟滞（要求最近敌人 > 射程+40 才追），结果制造出 230~270
-## 的「死区」—— 怪停在这段距离时既不进射程、又不触发追击，玩家在 270 处悬停
-## 对峙到天荒地老。而射程边界上的「进 1px 逃 / 出 1px 追」逐帧抖动其实是
-## 【正确行为】：那就是风筝（边打边撤），每轮贴近都会真的开火。故阈值就是
-## attack_range 本身，不加任何余量。
+## 【2026-10-09 批量测修正：逃阈值从 attack_range 收紧到 0.5×attack_range】
+## 旧判据「d > ar 且射程内无目标 → 追，否则逃」的两个阈值同为 ar —— 设计预期
+## 「边打边撤、每轮贴近都开火」的风筝，但实测三点全崩：① 玩家被锁在 ar 边界
+## 逐帧翻转（进 1px 逃 / 出 1px 追），净推进 ≈ 0（实测 20~50px/s vs 正常 225）；
+## ② 开火条件（最近敌 ≤ ar）在同一边界翻转 ⇒ 开火被不断打断；③ 全程固定在射程
+## 最外沿打【移动目标】（子弹飞完整个射程 ~1s，目标位移远超半径）⇒ 命中率崩。
+## 三者在波 12 残局叠成死锁：最后 1 只 Monitor 在 ar 边界锁死 2400s（超时 FAIL）。
+## 修正 = 逃只在「被贴身」（≤ 0.5×ar）时启动，其余距离一律推进 —— 把目标压到面前
+## 再打：子弹飞行时间减半以上、开火条件恒满足 ⇒ 有效 DPS 恢复；近战贴脸的
+## 「风筝」语义保留；超程无死区（0.5ar 以上全为推进）。阈值跟随 attack_range。
+## ⚠️ 本函数是 autopilot 专属路径：真人输入（键盘/摇杆）不经过，零影响。
 
 func _enemy_in_attack_range() -> bool:
 	for e in battle.enemies:
@@ -819,15 +981,12 @@ func _compute_autopilot_dir() -> Vector2:
 
 	var dir := flee
 
-	# 残局追击（判据见 _enemy_in_attack_range 注释）：射程内一只都打不到、而最近敌人
-	# 在射程外 → 反转为「逼近」，把目标压进射程内。用 attack_range 而非硬编码 230：
-	# 射程吃升级加成（range→attackRange），追击阈值必须跟着射程走。
-	#
+	# 追 / 逃（判据见 _enemy_in_attack_range 上方注释）：d > 0.5×ar 一律推进，
+	# 把目标压到面前再打；只有被贴身到 ≤ 0.5×ar 才转逃（近战风筝语义保留）。
 	# ⚠️ 必须显式标注 bool：右侧混了 Variant 句柄判空与算术比较，
 	# 类型推断拿不到确定类型会直接 Parse Error（本工程已踩 4+ 次的坑）。
 	var pursuing: bool = enemy != null \
-		and enemy_dist > attack_range \
-		and not _enemy_in_attack_range()
+		and enemy_dist > attack_range * AUTOPILOT_FLEE_RATIO
 	if pursuing:
 		# 追击撞楼问题（2026-09-21 三调）：通用避障「推离建筑」权重 1.8 会完全盖过
 		# 追击方向 —— 目标躲在楼正后方时，玩家在避障圈边缘进退循环（实测波 8 清到
@@ -840,7 +999,10 @@ func _compute_autopilot_dir() -> Vector2:
 			# 纯法向撞楼、move_and_slide 无切向可滑 → 像素级卡死（实测某局波 9 卡
 			# 4595s，玩家 (724,18) 纹丝不动）。改用「到楼矩形最近点」的距离，
 			# 任何尺寸的楼贴边即触发（Obstacle.world_rect 现成）。
-			var closest: Vector2 = o.world_rect().closest_point(global_position)
+			# ⚠️ Rect2 没有 closest_point（Godot 4 无此 API，调用 = 运行时错误 + 函数中止）——
+			# 2026-10-09 批量测修复：改用 _rect_closest_point（clamp 求矩形最近点）。
+			var rr: Rect2 = o.world_rect()
+			var closest: Vector2 = _rect_closest_point(rr, global_position)
 			var d: float = global_position.distance_to(closest)
 			if d < AVOID_OBSTACLE_DIST and d > 0.001:
 				var away: Vector2 = (global_position - closest).normalized()
@@ -876,7 +1038,9 @@ func _compute_autopilot_dir() -> Vector2:
 		if pursuing:
 			break   # 追击期间由切向绕行接管（见 pursuing 分支），通用避障会让位
 		# 同追击分支：用「到楼矩形最近点」距离，修大楼检测盲区（中心距离对大楼失真）
-		var closest: Vector2 = o.world_rect().closest_point(global_position)
+		# ⚠️ 同追击分支：Rect2 无 closest_point（Godot 4 无此 API）→ _rect_closest_point。
+		var rr: Rect2 = o.world_rect()
+		var closest: Vector2 = _rect_closest_point(rr, global_position)
 		var d: float = global_position.distance_to(closest)
 		if d < AVOID_OBSTACLE_DIST and d > 0.001:
 			var away: Vector2 = (global_position - closest).normalized()
@@ -894,6 +1058,15 @@ func _compute_autopilot_dir() -> Vector2:
 	if dir.length_squared() < 0.0001:
 		dir = Vector2.RIGHT
 	return dir
+
+
+## 「点到矩形的最近点」—— Godot 4 的 Rect2 没有 closest_point（调用即运行时错误：
+## Invalid call + 函数中止 ⇒ 返回值丢失；2026-10-09 批量测踩过）。clamp 各轴等价实现：
+## 点在矩形外 → 返回边缘/角上的最近点；点在矩形内 → 返回点本身（调用方用 d > 0.001 排除）。
+static func _rect_closest_point(r: Rect2, p: Vector2) -> Vector2:
+	return Vector2(
+		clampf(p.x, r.position.x, r.end.x),
+		clampf(p.y, r.position.y, r.end.y))
 
 
 func _clamp_to_arena() -> void:

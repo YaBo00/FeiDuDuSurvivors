@@ -19,7 +19,10 @@ extends RefCounted
 const SCHEMA_VERSION := 2
 ## 每局结束后的结算键（写死，防脏数据）
 ## best_endless_wave（2026-09-20）：无尽模式最佳抵达波次 —— 仅 endless 局入账。
-const KEYS := ["best_wave", "best_endless_wave", "total_kills", "total_gold", "runs", "wins", "meta_xp"]
+## hard_wins / evolutions（2026-10-08 成就批次）：困难难度胜场数 / 累计武器进化次数，
+## 供成就判定用；旧档缺键自动补 0（_safe_int 语义），schema 不升版。
+const KEYS := ["best_wave", "best_endless_wave", "total_kills", "total_gold", "runs", "wins", "meta_xp",
+	"hard_wins", "evolutions"]
 ## 已解锁角色的持久化键（不属于结算 int 键，单独读写）
 const UNLOCKED_KEY := "unlocked_chars"
 ## 默认解锁：只有嘉豪。其余角色走选角界面的「模拟充值」解锁（2026-09-20 用户需求）。
@@ -34,6 +37,11 @@ const SETTINGS_KEY := "settings"
 ## 两者的语义一致性由 record_kills() 单入口保证：解锁与计数永不分家。
 const SEEN_KEY := "seen_enemies"
 const KILLS_KEY := "kills_per_enemy"
+## 成就解锁列表（2026-10-08 成就批次）：已解锁的成就 id 去重数组。
+## 与 SEEN_KEY 同款 —— 不是结算 int 键，不进 KEYS，单独护栏收口。
+const ACHIEVEMENTS_KEY := "achievements"
+## 每角色通关次数 {char_id: count}（2026-10-08）："全员通关"成就的判定数据。
+const CLEARS_KEY := "clears_per_char"
 ## 设置项默认值 —— 【唯一的默认源】：读写类型护栏的回落值、UI 初值全部从这里取，
 ## 改这一处即全局生效（music_vol/sfx_vol 是 0~1 线性音量，两个开关是显示类）。
 const DEFAULT_SETTINGS := {
@@ -79,6 +87,37 @@ const META_UPGRADES := [
 	{"id": "meta_revive", "name": "复活契约", "desc": "每局开局自带 1 次复活（回 50% 血）",
 		"max_level": 1, "base_cost": 500, "cost_growth": 1.0},
 ]
+
+## 解锁网络（2026-10-09 meta 2.0）：一次性购买的「功能解锁」（无等级、买一次永久生效）。
+## 与 META_UPGRADES 的分工：强化 = 数值叠层；解锁 = 新功能开关。共用 meta_xp 货币。
+## cost 是单一价格（不参与 cost_growth 曲线）。全部 [PLACEHOLDER]。
+##
+## ⚠️ 生效方式（关键设计）：不是「消费端实时读档」，而是 Battle._ready 快照到
+## GameSession.meta_unlocks（见 GameSession.has_unlock）—— 战斗侧零文件 IO；
+## 且自检 / 探针进程快照恒空 = 干净世界（不受玩家真实存档影响，确定性基线不漂）。
+const META_UNLOCKS := [
+	{"id": "unlock_active_2", "name": "双持主动",
+		"desc": "可同时携带 2 件主动道具（空格 / F 分别发动）", "cost": 400},
+	{"id": "unlock_extra_3", "name": "第三副武器槽",
+		"desc": "副武器同时持有上限 +1（2 → 3）", "cost": 350},
+	# meta 2.0 第二批（2026-10-09）：武器自由 + 每日挑战。
+	# 生效方式注意：本两项不在战斗快照（GameSession.meta_unlocks）里判定 ——
+	# Title 侧直接读档控制【入口可见性】（难度层起始武器入口 / 主菜单每日挑战按钮），
+	# 玩家选择了才写 GameSession.weapon_pick / daily_mode。快照与它们无关。
+	{"id": "unlock_weapon_free", "name": "武器自由",
+		"desc": "可在模式选择里给任意角色替换起始武器（整条武器线随替换）", "cost": 450},
+	{"id": "unlock_daily", "name": "每日挑战",
+		"desc": "主菜单解锁每日挑战：每天固定随机种子，冲击当日最佳", "cost": 300},
+]
+## 已解锁功能键（与 unlocked_chars 同款：不是结算 int 键，不进 KEYS，单独护栏收口）。
+const UNLOCKS_META_KEY := "meta_unlocks"
+
+## 每日挑战纪录键（2026-10-09 meta 2.0 第二批）：当日最佳波数 + 记录日期。
+## 两者配对使用（跨天自动作废）—— 单独两键而不是日期为键的字典：
+## 只关心「今天」，历史无需保留，也免去字典无限膨胀的清理成本。
+## 与 UNLOCKS_META_KEY 同款：不是结算 int 键，不进 KEYS，ledger/_defaults/_save 单独收口。
+const DAILY_DATE_KEY := "daily_date"
+const DAILY_BEST_KEY := "daily_best"
 
 static var save_path := "user://meta_save.json"
 
@@ -149,6 +188,34 @@ static func ledger() -> Dictionary:
 			var n := _safe_int(kpe[id])
 			if GameStats.ENEMY_TEMPLATES.has(kid) and n > 0:
 				(d[KILLS_KEY] as Dictionary)[kid] = n
+	# 成就 / 每角色通关（2026-10-08 成就批次）：同款护栏 ——
+	# 只收表内合法 id、去重、计数钳 ≥1（≤0 与「未通关」同义，直接丢弃）。
+	var ach = parsed.get(ACHIEVEMENTS_KEY, null)
+	if typeof(ach) == TYPE_ARRAY:
+		for id in ach:
+			var aid := String(id)
+			if find_achievement(aid) != null and not (d[ACHIEVEMENTS_KEY] as Array).has(aid):
+				(d[ACHIEVEMENTS_KEY] as Array).append(aid)
+	var cpc = parsed.get(CLEARS_KEY, null)
+	if typeof(cpc) == TYPE_DICTIONARY:
+		for id in cpc:
+			var cid := String(id)
+			var n := _safe_int(cpc[id])
+			if GameStats.CHARACTERS.has(cid) and n > 0:
+				(d[CLEARS_KEY] as Dictionary)[cid] = n
+	# 解锁网络（2026-10-09 meta 2.0）：同款护栏 —— 只收表内合法 id、去重。
+	var unl = parsed.get(UNLOCKS_META_KEY, null)
+	if typeof(unl) == TYPE_ARRAY:
+		for id in unl:
+			var uid := String(id)
+			if find_unlock(uid) != null and not (d[UNLOCKS_META_KEY] as Array).has(uid):
+				(d[UNLOCKS_META_KEY] as Array).append(uid)
+	# 每日挑战纪录（2026-10-09 meta 2.0 第二批）：日期须是字符串、最佳须 ≥0。
+	# 读取侧【不做跨天判定】—— 跨天作废收口在 daily_best() 单一入口，这里只做类型护栏。
+	var dd = parsed.get(DAILY_DATE_KEY, null)
+	if typeof(dd) == TYPE_STRING:
+		d[DAILY_DATE_KEY] = String(dd)
+	d[DAILY_BEST_KEY] = maxi(0, _safe_int(parsed.get(DAILY_BEST_KEY, 0)))
 	return d
 
 
@@ -157,7 +224,11 @@ static func ledger() -> Dictionary:
 ## 折算放这里是【单入口】决策：所有结算路径自动带 xp，调用方零改动。
 ## endless（2026-09-20）：无尽局传 true —— 只有无尽局才更新 best_endless_wave；
 ## 普通局（含默认参数的旧调用方/探针）对该键零影响。
-static func record_run(victory: bool, wave: int, kills: int, gold: int, endless: bool = false) -> Dictionary:
+## char_id / difficulty / evolutions（2026-10-08 成就批次）：可选参数，**缺省 = 旧行为**
+## （探针与旧调用方零影响）。它们分别喂给三个成就判定：每角色通关数 / 困难胜场 / 武器进化数。
+static func record_run(victory: bool, wave: int, kills: int, gold: int, endless: bool = false,
+		char_id: String = "", difficulty: String = "", evolutions: int = 0,
+		xp_mul: float = 1.0) -> Dictionary:
 	var d := ledger()
 	d["runs"] = int(d["runs"]) + 1
 	if victory:
@@ -167,7 +238,16 @@ static func record_run(victory: bool, wave: int, kills: int, gold: int, endless:
 		d["best_endless_wave"] = maxi(int(d["best_endless_wave"]), int(wave))
 	d["total_kills"] = int(d["total_kills"]) + maxi(0, int(kills))
 	d["total_gold"] = int(d["total_gold"]) + maxi(0, int(gold))
-	d["meta_xp"] = int(d["meta_xp"]) + xp_earned(victory, int(wave), int(kills))
+	# 开局诅咒（2026-10-08 第二梯队）：xp_mul 缺省 1.0 = 旧行为逐位不变
+	#（round(float(x) * 1.0) 与原整数 x 相同）。诅咒局由 Battle 传 GameStats.curse_xp_mul()。
+	d["meta_xp"] = int(d["meta_xp"]) + int(roundf(float(xp_earned(victory, int(wave), int(kills))) * xp_mul))
+	# ---- 成就批次计数（无效 char_id 丢弃；hard 只在胜场+困难时计；evolutions 钳 ≥0）----
+	if victory and GameStats.CHARACTERS.has(char_id):
+		var clears: Dictionary = d[CLEARS_KEY]
+		clears[char_id] = maxi(0, int(clears.get(char_id, 0))) + 1
+	if victory and difficulty == "hard":
+		d["hard_wins"] = int(d["hard_wins"]) + 1
+	d["evolutions"] = int(d["evolutions"]) + maxi(0, int(evolutions))
 	_save(d)
 	return d
 
@@ -260,6 +340,73 @@ static func meta_bonus() -> Dictionary:
 	}
 
 
+# ---------------------------------------------------------------- 解锁网络（2026-10-09 meta 2.0）
+## 按 id 查解锁定义（找不到返回 null）。返回类型必须显式 Variant ——
+## 无标注时 GDScript 会把返回值推断为 null，调用处下标解析直接报错（铁律第 6 次踩坑）。
+static func find_unlock(id: String) -> Variant:
+	for u in META_UNLOCKS:
+		if String(u["id"]) == id:
+			return u
+	return null
+
+
+## 该功能是否已解锁（读真实档；标题 UI 用）。未知 id 恒 false。
+static func is_meta_unlocked(id: String) -> bool:
+	return (ledger()[UNLOCKS_META_KEY] as Array).has(id)
+
+
+## 购买解锁（原子：先查再扣再落盘）。xp 够且未解锁才成功。返回是否成功。
+## 已解锁时返回 false（拒绝二次扣费 —— 「幂等成功」在这里会掩盖 UI 重复点击的 bug）。
+static func purchase_unlock(id: String) -> bool:
+	var u: Variant = find_unlock(id)
+	if u == null:
+		return false
+	var d := ledger()
+	var arr: Array = d[UNLOCKS_META_KEY]
+	if arr.has(id):
+		return false
+	var price := int(u["cost"])
+	if int(d["meta_xp"]) < price:
+		return false
+	d["meta_xp"] = int(d["meta_xp"]) - price
+	arr.append(id)
+	_save(d)
+	return true
+
+
+## 已解锁集合的快照（{id: true}）—— Battle._ready 用它填充 GameSession.meta_unlocks。
+static func active_unlock_map() -> Dictionary:
+	var out := {}
+	for id in (ledger()[UNLOCKS_META_KEY] as Array):
+		out[String(id)] = true
+	return out
+
+
+# ---------------------------------------------------------------- 每日挑战纪录（2026-10-09 meta 2.0 第二批）
+## 当日最佳波数。**跨天自动作废**（返回 0）—— 日期与 GameStats.daily_date_key()
+## 不一致 = 旧纪录不再代表「今天」，不混淆玩家。
+static func daily_best() -> int:
+	var d := ledger()
+	if String(d[DAILY_DATE_KEY]) != GameStats.daily_date_key():
+		return 0
+	return maxi(0, int(d[DAILY_BEST_KEY]))
+
+
+## 记录一局每日挑战结果（取当日最大值），落盘并返回新的当日最佳。
+## 跨天首局：日期不同 ⇒ base 从 0 起（旧纪录作废后再写入今天的成绩）。
+static func record_daily(wave: int) -> int:
+	var d := ledger()
+	var today := GameStats.daily_date_key()
+	var base := 0
+	if String(d[DAILY_DATE_KEY]) == today:
+		base = maxi(0, int(d[DAILY_BEST_KEY]))
+	var best := maxi(base, maxi(0, int(wave)))
+	d[DAILY_DATE_KEY] = today
+	d[DAILY_BEST_KEY] = best
+	_save(d)
+	return best
+
+
 # ---------------------------------------------------------------- 角色解锁（模拟充值消费端）
 ## 角色是否已解锁。默认只有 basic（DEFAULT_UNLOCKED）；坏档/旧档无此键时同回落。
 static func is_char_unlocked(id: String) -> bool:
@@ -282,7 +429,8 @@ static func unlock_char(id: String) -> bool:
 # ---------------------------------------------------------------- 敌人图鉴（2026-09-22）
 ## 图鉴入账：把一局的「每种敌人击杀数」累加进账本并落盘。**唯一写入入口**。
 ## 参数 kills = {enemy_type_id: count}（Battle 每局结束后交给这里）。
-##   · 只认 ENEMY_TEMPLATES 里的合法 id（防脏数据）；计数 ≤0 的项直接跳过。
+##   · 只认【图鉴白名单】（GameStats.is_codex_enemy = CODEX_ORDER）的 id ——
+##     同时覆盖「非模板脏数据」与「模板内但非图鉴怪（如 Medium）」；计数 ≤0 的项直接跳过。
 ##   · 同一 id 同时累加 kills_per_enemy 并追加进 seen_enemies（去重）——
 ##     「已解锁」与「击杀数 > 0」在数据层同源，不可能出现解锁了却 0 杀的条目。
 ## 空字典直接返回（不写盘）—— 保证「没杀过怪的局」不产生任何 IO 与副作用。
@@ -295,7 +443,10 @@ static func record_kills(kills: Dictionary) -> void:
 	var touched := false
 	for id in kills.keys():
 		var eid := String(id)
-		if not GameStats.ENEMY_TEMPLATES.has(eid):
+		# 唯一口径 = 图鉴白名单（2026-10-09 批量测修正）：旧版只挡「非模板 id」，
+		# Medium（模板内、图鉴外）会被记进账本 —— 与「图鉴数据只装图鉴怪」的
+		# 设计不符（_ProbeCodex 契约）。is_codex_enemy 同时覆盖未知 id 场景。
+		if not GameStats.is_codex_enemy(eid):
 			continue
 		var n := maxi(0, _safe_int(kills[id]))
 		if n <= 0:
@@ -329,6 +480,107 @@ static func enemy_seen(type_name: String) -> bool:
 ## 单个敌人累计击杀数（未知 id / 未击杀 = 0）。
 static func enemy_kills(type_name: String) -> int:
 	return maxi(0, int((ledger()[KILLS_KEY] as Dictionary).get(type_name, 0)))
+
+
+# ---------------------------------------------------------------- 成就（2026-10-08 玩法增补批次）
+## 成就表：{id, name, desc, xp}。xp = 解锁时一次性发放的强化点数（与局外强化同一货币，
+## [PLACEHOLDER] 数值待 playtest）。
+## 判定条件全部从【账本已有数据】推导（见 _ach_met）——不额外维护镜像计数器，
+## 改条件只动 _ach_met 的 match 分支；UI 侧自动遍历本表渲染 ⇒ 加条目不用动 UI 代码。
+const ACHIEVEMENTS := [
+	{"id": "first_run", "name": "初次上路", "desc": "完成第一局游戏", "xp": 20},
+	{"id": "first_win", "name": "初尝胜果", "desc": "通关一次（20 波）", "xp": 60},
+	{"id": "hard_win", "name": "硬核幸存者", "desc": "以困难难度通关一次", "xp": 120},
+	{"id": "all_chars_win", "name": "全员通关", "desc": "六个角色各通关一次", "xp": 300},
+	{"id": "kills_1000", "name": "小有所成", "desc": "累计击杀 1000 只敌人", "xp": 80},
+	{"id": "kills_5000", "name": "一夫当关", "desc": "累计击杀 5000 只敌人", "xp": 150},
+	{"id": "codex_full", "name": "图鉴收藏家", "desc": "解锁敌人图鉴全部条目", "xp": 100},
+	{"id": "endless_20", "name": "深入无尽", "desc": "无尽模式抵达第 20 波", "xp": 80},
+	{"id": "endless_30", "name": "无尽旅人", "desc": "无尽模式抵达第 30 波", "xp": 150},
+	{"id": "weapon_evolved", "name": "武器觉醒", "desc": "完成一次武器进化", "xp": 80},
+	{"id": "boss_slayer", "name": "屠龙者", "desc": "累计击败 5 只 BOSS", "xp": 100},
+]
+
+
+## 按 id 查成就定义（找不到返回 null）。返回类型必须显式 Variant ——
+## 无标注时 GDScript 会把返回值推断为 null 类型，调用处下标解析直接报错（铁律第 6 次踩坑）。
+static func find_achievement(id: String) -> Variant:
+	for a in ACHIEVEMENTS:
+		if String(a["id"]) == id:
+			return a
+	return null
+
+
+## 成就是否已解锁。未知 id 恒 false。
+static func achievement_unlocked(id: String) -> bool:
+	return (ledger()[ACHIEVEMENTS_KEY] as Array).has(id)
+
+
+## 成就检查（**唯一入口**）：扫全表，把「条件已满足且未解锁」的条目解锁并一次性发放 xp。
+## 返回本次新解锁的成就定义副本数组（Battle 把它透给结算页展示）。
+## 调用点 = Battle._end_run（record_run / record_kills 落账之后）—— 判定数据此时已是最新。
+## 无新解锁时零 IO（不写盘）。
+static func check_achievements() -> Array:
+	var d := ledger()
+	var unlocked: Array = d[ACHIEVEMENTS_KEY]
+	var newly: Array = []
+	var gain := 0
+	for a in ACHIEVEMENTS:
+		var id := String(a["id"])
+		if unlocked.has(id):
+			continue
+		if not _ach_met(id, d):
+			continue
+		unlocked.append(id)
+		gain += maxi(0, int(a["xp"]))
+		newly.append(a.duplicate())
+	if newly.is_empty():
+		return newly
+	d["meta_xp"] = int(d["meta_xp"]) + gain
+	_save(d)
+	return newly
+
+
+## 条件判定（唯一判定源）：match id → 读账本字段。数据缺失/类型异常一律按未达标处理（never crash）。
+static func _ach_met(id: String, d: Dictionary) -> bool:
+	var kpe: Dictionary = d[KILLS_KEY]
+	var seen: Array = d[SEEN_KEY]
+	var clears: Dictionary = d[CLEARS_KEY]
+	match id:
+		"first_run":
+			return int(d["runs"]) >= 1
+		"first_win":
+			return int(d["wins"]) >= 1
+		"hard_win":
+			return int(d["hard_wins"]) >= 1
+		"all_chars_win":
+			# 遍历角色表而不是硬编码 6 个 id —— 以后加角色，成就自动跟着变严（要重新全通）。
+			for cid in GameStats.CHARACTERS.keys():
+				if int(clears.get(String(cid), 0)) < 1:
+					return false
+			return true
+		"kills_1000":
+			return int(d["total_kills"]) >= 1000
+		"kills_5000":
+			return int(d["total_kills"]) >= 5000
+		"codex_full":
+			return seen.size() >= GameStats.CODEX_ORDER.size()
+		"endless_20":
+			return int(d["best_endless_wave"]) >= 20
+		"endless_30":
+			return int(d["best_endless_wave"]) >= 30
+		"weapon_evolved":
+			return int(d["evolutions"]) >= 1
+		"boss_slayer":
+			# BOSS 累计击杀 = kills_per_enemy 里 behavior=="boss" 的模板之和（Boss / BossPUA）。
+			var n := 0
+			for eid in kpe.keys():
+				var t := String(eid)
+				if GameStats.ENEMY_TEMPLATES.has(t) \
+						and String(GameStats.ENEMY_TEMPLATES[t].get("behavior", "")) == "boss":
+					n += maxi(0, _safe_int(kpe[eid]))
+			return n >= 5
+	return false
 
 
 # ---------------------------------------------------------------- 设置项（2026-09-22 设置菜单）
@@ -408,6 +660,11 @@ static func _defaults() -> Dictionary:
 	d[SETTINGS_KEY] = DEFAULT_SETTINGS.duplicate(true)
 	d[SEEN_KEY] = []
 	d[KILLS_KEY] = {}
+	d[ACHIEVEMENTS_KEY] = []
+	d[CLEARS_KEY] = {}
+	d[UNLOCKS_META_KEY] = []
+	d[DAILY_DATE_KEY] = ""
+	d[DAILY_BEST_KEY] = 0
 	return d
 
 
@@ -426,6 +683,14 @@ static func _save(d: Dictionary) -> bool:
 	# 敌人图鉴：写前同样过滤（防外部直改 ledger 返回的字典把脏数据写回去）。
 	out[SEEN_KEY] = _safe_seen(d.get(SEEN_KEY, []))
 	out[KILLS_KEY] = _safe_kills(d.get(KILLS_KEY, {}))
+	# 成就 / 每角色通关（2026-10-08）：同一套写前护栏。
+	out[ACHIEVEMENTS_KEY] = _safe_achievements(d.get(ACHIEVEMENTS_KEY, []))
+	out[CLEARS_KEY] = _safe_clears(d.get(CLEARS_KEY, {}))
+	# 解锁网络（2026-10-09 meta 2.0）：同一套写前护栏。
+	out[UNLOCKS_META_KEY] = _safe_unlocks(d.get(UNLOCKS_META_KEY, []))
+	# 每日挑战纪录（2026-10-09 meta 2.0 第二批）：写前类型护栏（字符串 / ≥0 int）。
+	out[DAILY_DATE_KEY] = String(d.get(DAILY_DATE_KEY, ""))
+	out[DAILY_BEST_KEY] = maxi(0, _safe_int(d.get(DAILY_BEST_KEY, 0)))
 	f.store_string(JSON.stringify(out, "  "))
 	return true
 
@@ -452,4 +717,41 @@ static func _safe_kills(raw: Variant) -> Dictionary:
 		var n := _safe_int(raw[id])
 		if GameStats.ENEMY_TEMPLATES.has(eid) and n > 0:
 			out[eid] = n
+	return out
+
+
+## 成就解锁列表护栏：只留成就表内的合法 id、去重、保持顺序。非数组一律返回空表。
+static func _safe_achievements(raw: Variant) -> Array:
+	var out: Array = []
+	if typeof(raw) != TYPE_ARRAY:
+		return out
+	for id in raw:
+		var aid := String(id)
+		if find_achievement(aid) != null and not out.has(aid):
+			out.append(aid)
+	return out
+
+
+## 每角色通关数护栏：只留合法角色 id 且计数 ≥1。非字典一律返回空字典。
+static func _safe_clears(raw: Variant) -> Dictionary:
+	var out := {}
+	if typeof(raw) != TYPE_DICTIONARY:
+		return out
+	for id in raw:
+		var cid := String(id)
+		var n := _safe_int(raw[id])
+		if GameStats.CHARACTERS.has(cid) and n > 0:
+			out[cid] = n
+	return out
+
+
+## 解锁网络护栏：只留解锁表内的合法 id、去重、保持顺序。非数组一律返回空表。
+static func _safe_unlocks(raw: Variant) -> Array:
+	var out: Array = []
+	if typeof(raw) != TYPE_ARRAY:
+		return out
+	for id in raw:
+		var uid := String(id)
+		if find_unlock(uid) != null and not out.has(uid):
+			out.append(uid)
 	return out

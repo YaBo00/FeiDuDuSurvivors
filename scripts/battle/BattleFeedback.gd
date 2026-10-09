@@ -19,6 +19,9 @@ var _floats: Array[Label] = []
 var _float_life: Array[float] = []
 var _bursts: Array[DeathBurst] = []
 var _wave_banner: Label = null
+## 横幅规则图标（2026-10-09 美术入库）：无尽战场规则时在横幅文字上方挂 64px 图标。
+## 非无尽 / 缺图 → texture=null 且隐藏（横幅行为与旧版一致）。
+var _banner_icon: TextureRect = null
 
 
 ## 初始化：创建所有池对象。world 用来挂世界空间的飘字和爆裂。
@@ -56,6 +59,16 @@ func setup(world: Node2D) -> void:
 	_wave_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiFont.install(_wave_banner, 52)
 	add_child(_wave_banner)
+	# 规则图标：横幅文字上方居中（64px），随横幅一同淡入淡出（独立 tween，见 show_wave_banner）。
+	_banner_icon = TextureRect.new()
+	_banner_icon.visible = false
+	_banner_icon.size = Vector2(64.0, 64.0)
+	_banner_icon.position = Vector2((1280.0 - 64.0) * 0.5, 140.0)
+	_banner_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_banner_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_banner_icon.z_index = 45
+	_banner_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_banner_icon)
 
 
 ## 重开一局时复位所有池（隐藏残留的飘字和爆裂）
@@ -119,7 +132,8 @@ func play_evolution_nova(pos: Vector2) -> void:
 
 
 ## 波次开始横幅：淡入 → 停留 → 淡出。
-func show_wave_banner(wave_num: int, theme_name: String) -> void:
+## rule_id（2026-10-09 美术入库，缺省 = 无图标）：非空且图在库时，在文字上方挂规则图标。
+func show_wave_banner(wave_num: int, theme_name: String, rule_id: String = "") -> void:
 	_wave_banner.text = "第 %d 波 · %s" % [wave_num, theme_name]
 	_wave_banner.modulate = Color(1, 1, 1, 0)
 	_wave_banner.visible = true
@@ -128,3 +142,16 @@ func show_wave_banner(wave_num: int, theme_name: String) -> void:
 	tw.tween_interval(0.55)
 	tw.tween_property(_wave_banner, "modulate:a", 0.0, 0.35)
 	tw.tween_callback(func(): _wave_banner.visible = false)
+	# 图标用【独立 tween】：原横幅的 tween 链逐拍保持不变（非无尽局两个节点之间零差异）。
+	var icon_tex := AssetDB.endless_icon(rule_id)
+	_banner_icon.texture = icon_tex
+	if icon_tex == null:
+		_banner_icon.visible = false
+		return
+	_banner_icon.modulate = Color(1, 1, 1, 0)
+	_banner_icon.visible = true
+	var twi := create_tween()
+	twi.tween_property(_banner_icon, "modulate:a", 1.0, 0.18)
+	twi.tween_interval(0.55)
+	twi.tween_property(_banner_icon, "modulate:a", 0.0, 0.35)
+	twi.tween_callback(func(): _banner_icon.visible = false)

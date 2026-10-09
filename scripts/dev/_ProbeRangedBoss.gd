@@ -356,7 +356,11 @@ func _run_boss_skill_suite() -> void:
 	var dt := SKILL_DT
 	var fake := Node2D.new()
 	root.add_child(fake)
-	fake.global_position = Vector2.ZERO
+	# 目标放场心（2026-10-09 批量测适配）：旧值 (0,0) 会把 Boss 引到角落，charge 朝
+	# 场外冲锋时被「竞技场边界收口」（Enemy._physics_process 新增：场内怪不出界）
+	# 钳在 (radius,radius) 原地 → 位移 0，与「冲锋速度 540」断言冲突。场心场景下
+	# 任意方向 9 秒内都不触边，断言语义（冲锋速度不受边界限制）不变。
+	fake.global_position = GameStats.ARENA_CENTER
 	var e := _make_reflect_enemy("Boss", Vector2(400.0, 0.0), fake)
 	_check(not bool(e.get("is_dead")), "反射构造的独立 Boss 已就绪（behavior=%s hp=%d）" % [
 		String(e.get("behavior")), int(e.get("hp"))])

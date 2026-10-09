@@ -36,11 +36,17 @@ const SELFTEST_TICKS := 360          # 与 time_scale 配合，保持单步 delt
 ## 2026-09-21 波次节奏改版（30s 投放 + 清场制通关）后重校准：单波时长不再固定 30s，
 ## 而是 30s 投放 + 清场尾（残局扫描普遍 30~90s，随波数增长）。旧上限 900s 是按
 ## 「20 波 × 30s = 600s」校准的，清场制下 20 波实测必然跑不满 → 提到 2400s。
-const SELFTEST_MAX_GAME_TIME := 2400.0
+## 2026-10-09 批量测再校准：2400s 时停在波 17 清场中段（61/200 余只，击杀仍在
+## 持续推进、非死锁）—— 09-22 后精英与高波群规模抬高了单波清场尾，按实测速度
+## 外推全程 ≈ 3400~3800s → 提到 4200s。纯测试时限，不影响玩家侧任何数值。
+const SELFTEST_MAX_GAME_TIME := 4200.0
 ## 无尽自检（--selftest --endless）跑 ENDLESS_SELFTEST_WAVES（40）波。清场制下
 ## 波 21+ 每波 240+ 只，清场尾远长于投放期 —— 旧上限 1800s 必然超时。
 ## 按 40 波 ×（30s 投放 + 60~100s 清场）≈ 3600~5200s 校准到 5400s。
-const ENDLESS_SELFTEST_MAX_GAME_TIME := 5400.0
+## 2026-10-09 批量测再校准：修复后顺利局实测 28 波用 5400s（≈193s/波，外推全程
+## ≈7700s），5400 上限必超（停在波 29）。按外推值 ×1.3 余量 → 10000s。
+## 纯测试时限，不影响玩家侧任何数值。
+const ENDLESS_SELFTEST_MAX_GAME_TIME := 10000.0
 
 const ENEMY_SCENE := preload("res://scenes/entities/Enemy.tscn")
 const PROJECTILE_SCENE := preload("res://scenes/entities/Projectile.tscn")
@@ -115,6 +121,34 @@ var items_owned: Array[String] = []
 ## 本次商店是否已消费「商店券」（精英掉落，全店 8 折；2026-09-22 词缀系统）。
 ## 每次开店时按 Player.shop_coupon 重算 —— 不清零的旧值绝不允许跨店残留。
 var _coupon_active := false
+
+# ---- Boss 宝箱（2026-10-08 玩法增补批次）----
+## 已拾取但尚未开面板的宝箱数。波末真空回收路径会先记账、由 end_wave 链开面板
+## （见 _on_chest_collected 的两条路径说明）；正常一局同一时刻最多 1。
+var _chest_pending := 0
+## 宝箱面板选完后的去向："fight"（回战斗）/ "wave"（链去波末升级）/ "end"（链去通关结算）。
+var _chest_after := ""
+## 残敌追击状态（2026-10-08 残敌清场加速）：节流计时 + 当前开关（供测试打印去重）。
+var _straggler_t := 0.0
+var _straggler_on := false
+## 忧郁光环施加节流（2026-10-08 补齐道具）。
+var _aura_t := 0.0
+## 升级重抽（2026-10-08 旗舰批次）：本组三选一在首开时消费的「预知未来额外选项数」。
+## 重抽时补回它，保证重摇不缩水卡位数；_open_upgrade（新一组）清零。
+var _reroll_extra_cards := 0
+
+# ---- 局内事件系统（2026-10-08 第二梯队）----
+## 场上事件实体（BattleEvent：祭坛 / 黑市 / 挑战柱）。波末清场；触发经距离判定。
+var events: Array = []
+## 正在交互的事件实体（面板回调消费它；「离开」保留、需走开 re-arm 再重触发）。
+var _pending_event: BattleEvent = null
+## 限时挑战进行态（跨面板/跨帧）：剩余时间 / 击杀基准（实时差值算成绩）。
+var _challenge_active := false
+var _challenge_left := 0.0
+var _challenge_base_kills := 0
+var _challenge_dead := 0
+## 挑战中央通告的「上一整秒」（每整秒刷新一次文案，避免每帧重设 Label）。
+var _challenge_notice_sec := -1
 ## 建筑物矩形缓存。敌人不用物理体，靠这批矩形做数学推出（见 Enemy._resolve_obstacles）。
 var obstacle_rects: Array[Rect2] = []
 
@@ -208,6 +242,26 @@ func _ready() -> void:
 	selftest_defeat = _has_flag("--selftest-defeat")
 	balance = _has_flag("--balance")
 	selftest = _has_flag("--selftest") and not selftest_defeat and not balance
+	# Boss 阶段战 / 波 15 小 Boss 的测试基线开关（2026-10-08 第二梯队）：selftest /
+	# selftest-defeat 下整体禁用 —— Boss 保持旧行为、波 15 保持旧内容 ⇒ 基线不漂；
+	# balance / 探针 / 正常游玩恒启用（balance 要看阶段后的真实数值）。
+	GameStats.boss_phase_enabled = not (selftest or selftest_defeat)
+	# 无尽 2.0（战场规则 + 里程碑）的测试基线开关（2026-10-08 第二梯队）：同款口径 ——
+	# selftest / selftest-defeat 下整体禁用（开关在读取口内收口，消费点零分支）。
+	# ⚠️ selftest --endless 跑 40 波会把波 21-40 的规则与里程碑全跑一遍 —— 不挡必漂基线。
+	GameStats.endless_rules_enabled = not (selftest or selftest_defeat)
+	# 多地图系统（2026-10-09 第二梯队·收尾批）的测试基线开关：selftest / selftest-defeat
+	# 下关闭 ⇒ 障碍保持开局布局、无环境机制，基线不漂。**探针进程（--script）也关闭** ——
+	# 与 boss_phase / endless_rules 不同：换图重建会消耗随机流（额外 randf 序列），
+	# 污染面比纯乘区大，故默认不信任探针；新探针 _ProbeMaps 手动置 true 构造世界。
+	GameStats.map_enabled = not (selftest or selftest_defeat or _probe_process())
+	# meta 2.0 解锁网络快照（2026-10-09）：正常游玩从真实档刷新；自检 / 平衡 / 探针
+	# 保持【干净世界】（空字典 = 全部未解锁，旧行为逐位不变）—— 探针要测解锁效果时
+	# 手动写 GameSession.meta_unlocks。读档只在进战斗一次（战斗热路径零文件 IO）。
+	if _testing() or _probe_process():
+		GameSession.meta_unlocks = {}
+	else:
+		GameSession.meta_unlocks = MetaSave.active_unlock_map()
 	# `--touch`：桌面端强制显示虚拟摇杆（真机有触摸屏会自动显示，无需此旗标）。
 	# 注入发生在子节点 _ready 之后 —— TouchControls 的 setter 会立刻重算可见性。
 	if touch != null:
@@ -227,7 +281,7 @@ func _ready() -> void:
 		GameSession.begin_run(forced_char)
 		print("[CHAR] 命令行指定角色：%s（武器：%s）" % [
 			GameSession.selected_char,
-			GameStats.weapon_for_char(GameSession.selected_char)["name"]])
+			GameStats.weapon_for_char(GameStats.effective_weapon(GameSession.selected_char))["name"]])
 	# `--difficulty <normal|hard>`：命令行指定难度（供无头自检 / 门禁验证困难乘区）。
 	# 必须在 start_run() 之前 —— Enemy.setup 经 GameStats.hp_scale 读 GameSession.difficulty。
 	# 正常游玩不传此参数：难度由主菜单选择，这里保持 GameSession 现值不动。
@@ -264,6 +318,10 @@ func _ready() -> void:
 	combat.shake_requested.connect(shake)
 	combat.hitstop_requested.connect(_hitstop_brief)
 	combat.player_died.connect(_on_player_died)
+	# Boss 宝箱（2026-10-08）：掉落/拾取在 CombatResolver，面板与奖励在这里（见 _on_chest_collected）。
+	combat.chest_collected.connect(_on_chest_collected)
+	# 宝箱怪现形（2026-10-08 局内事件系统）：假宝箱被开 → 原位刷一只 Mimic 敌人。
+	combat.mimic_revealed.connect(_on_mimic_revealed)
 	# 副武器系统（2026-09-22）：与 CombatResolver 同一种组合方式（new + add_child + setup）。
 	# 必须在 start_run() 之前建好 —— start_run 里的 extra.reset() 要用到它。
 	extra = ExtraWeaponSystem.new()
@@ -293,6 +351,15 @@ func _ready() -> void:
 	pause_menu.to_title_requested.connect(func():
 		Engine.time_scale = 1.0   # 倍速只允许在战斗内生效：离开战斗强制还原引擎时标
 		get_tree().change_scene_to_file("res://scenes/main/Title.tscn")
+	)
+	# 暂停菜单「本局构筑一览」的数据提供者（2026-10-08 QoL 批次）：PauseMenu 只管渲染，
+	# 数据口径收口在本类（只有 Battle 同时握着 player / items_owned / extra 的完整视图）。
+	pause_menu.build_provider = _build_overview_data
+	# 主动道具槽（2026-10-08 旗舰批次）：HUD 图标按钮点击 → 发动（与空格同一入口，守卫同源）。
+	hud.active_use_requested.connect(_try_use_active)
+	# 结算「再来一局」（2026-10-08 旗舰批次）：与暂停菜单/按 R 重开走同一条 start_run 路径。
+	result_panel.restart_requested.connect(func():
+		start_run()
 	)
 
 	_build_speed_button()
@@ -342,6 +409,11 @@ func _ready() -> void:
 #region 开局 / 波次编排
 func start_run() -> void:
 	_clear_all()
+	# 每日种子局（2026-10-09 meta 2.0 第二批）：在一切随机消费之前重放当日种子 ——
+	# 每次开局（含死亡重开）都回同一起手，可反复练习。放在 _clear_all 之后：
+	# 清场里的残留结算（挑战柱跨局奖励等）不算进本局的种子随机流，保证「干净起手」。
+	# 守卫：非每日 / 自检 / 探针进程一律不碰随机流（见 _apply_daily_seed）。
+	_apply_daily_seed()
 	wave_num = 0
 	wave_timer = 0.0
 	kills = 0
@@ -351,6 +423,11 @@ func start_run() -> void:
 	_cost_hp_mult = 1.0
 	_cost_dmg_mult = 1.0
 	items_owned.clear()
+	_chest_pending = 0
+	_chest_after = ""
+	_straggler_t = 0.0
+	_straggler_on = false
+	_aura_t = 0.0
 	spawn_remaining = 0
 	_game_time = 0.0
 	_upgrade_queue.clear()
@@ -369,6 +446,7 @@ func start_run() -> void:
 	combat.reset()
 	extra.reset()     # 副武器每局清空（不继承上一局，也不继承 meta）
 	_refresh_hud_extra()   # 同步清空 HUD 副武器栏（否则上一局的图标会留到下一次 HUD 拍）
+	_refresh_hud_active()  # 同步清空 HUD 主动道具槽（同理：上一局的图标不能留到下一局）
 	_themes_seen.clear()
 	feedback.reset()
 	_hitstop_gen += 1
@@ -422,9 +500,15 @@ func _on_wave_started(wave_no: int, subtitle: String) -> void:
 	# [WAVE-DBG] 打出的「波 N 清场等待 X 秒」是跨波累计值，取证语义失真（会把
 	# 上一波的卡顿时间算进这一波）。
 	_wave_clear_wait = 0.0
-	feedback.show_wave_banner(wave_no, subtitle)
+	# 无尽战场规则图标（2026-10-09 美术入库）：横幅文字上方挂 64px 规则图标；
+	# 非无尽 / 开关关 / 缺图时 rule 为空 → 图标不显示（横幅行为与旧版一致）。
+	var rule: Dictionary = GameStats.endless_rule(wave_no)
+	feedback.show_wave_banner(wave_no, subtitle, String(rule.get("id", "")))
 	if audio != null:
 		audio.play("wave", -6.0)
+	# 局内事件（2026-10-08 第二梯队）：新波开始时按概率生成 1 个事件实体。
+	# 放在横幅之后：事件生成的随机调用与开波演出无耦合，纯粹是顺序选择。
+	_maybe_spawn_event()
 
 
 # ================================================================ 地面自绘
@@ -470,6 +554,14 @@ func _build_floor_overlays() -> void:
 ## 应用地面主题：换关时由 WaveDirector.floor_changed 信号触发。贴图是共享资源，
 ## 切换只是换引用（零 GPU 成本），可以在波次开始的同帧同步完成。
 func _apply_floor_theme(t: Dictionary) -> void:
+	# 地图环境机制快照（2026-10-09 第二梯队·多地图）：机制与主题一一对应，同步放在
+	# early-return 之前 —— 同图重开（R）也保证 player.map_effects 与当前图一致。
+	# map_enabled=false（selftest / 探针）→ 空字典（Player 侧全 1.0 乘区，旧行为逐位）。
+	if player != null:
+		var eff: Dictionary = {}
+		if GameStats.map_enabled and t.has("effect"):
+			eff = t["effect"]
+		player.map_effects = eff
 	if String(t.get("id", "")) == String(_floor_theme.get("id", "")):
 		return
 	_floor_theme = t
@@ -638,6 +730,14 @@ func _tick_fighting(delta: float) -> void:
 
 	wave.tick_spawn(delta)
 
+	# 残敌清场加速（2026-10-08）：窗口关闭 + 场上只剩最后几只时给残敌「追击」状态。
+	# 放在 tick_spawn 之后：本帧刚投出来的怪（窗口关闭当帧的收尾投放）也纳入判定。
+	_tick_straggler_hunt(delta)
+	# 忧郁光环（2026-10-08 旗舰批次）：slow_aura > 0 时给半径内敌人续减速（内部节流）。
+	_aura_tick(delta)
+	# 局内事件（2026-10-08 第二梯队）：触发距离判定 + re-arm + 限时挑战计时。
+	_tick_events(delta)
+
 	# 战斗部分（接触伤害 → 弹道 → 清理 → 网格 → 分离力）整块交给 CombatResolver。
 	# 唯一需要在此处保留的判定：接触伤害可能致死并跳出 FIGHTING，须立刻停手。
 	combat.contact_damage()
@@ -672,6 +772,7 @@ func _tick_fighting(delta: float) -> void:
 		_hud_timer = HUD_INTERVAL
 		hud.set_data(player, wave_num, wave_timer, GameStats.WAVE_COUNT)
 		_refresh_hud_extra()   # 副武器图标 + 等级点（Hud 内部指纹去重，没变就不动）
+		_refresh_hud_active()  # 主动道具槽（冷却遮罩/秒数，指纹去重）
 	# 清场进度条逐帧刷新（2026-09-21）：它是 HUD 里唯一要求帧级实时的元素 ——
 	# 杀一只怪要立刻看到条涨，而 set_data 走的是 HUD_INTERVAL 节拍（会明显滞后一拍）。
 	# 读 WaveDirector 的比值而不是自己算，保证与关内判定 _wave_cleared() 同源。
@@ -689,9 +790,13 @@ func _on_burst_requested(pos: Vector2, color: Color, big: bool) -> void:
 	feedback.spawn_burst(pos, color, big)
 
 
+## 音效桥接（CombatResolver / Enemy 的 sfx_requested 信号 → GameAudio）。
+## 【2026-10-08 语义修正】第三参 pitch = 【音高倍率】（1.0 = 原调、1.3 = 高音、0.6 = 低沉），
+## 不再直通为随机抖动 —— 各调用点填的值本来就是音高意图（见 GameAudio.play 注释）。
+## 抖动固定 0.05（缺省），由 GameAudio 内部做小幅随机。
 func _on_sfx_requested(name: String, volume_db: float, pitch: float) -> void:
 	if audio != null:
-		audio.play(name, volume_db, pitch)
+		audio.play(name, volume_db, 0.05, pitch)
 
 
 ## 武器进化播报（2026-09-20 可达性升级）：大号金字飘屏 + 震屏 + 双音效 ——
@@ -792,6 +897,19 @@ func _on_boss_rage(pos: Vector2) -> void:
 	hud.show_center_notice("BOSS 狂暴了！", GameStats.BOSS_RAGE_NOTICE_TIME)
 	feedback.spawn_burst(pos, Color(0.95, 0.2, 0.2), true)
 	_on_sfx_requested("kill", -2.0, 0.7)
+
+
+## Boss 转阶段（2026-10-08 第二梯队）：震屏 + 中央大字「阶段 k/N」+ 爆裂 + 音效。
+## 属性升级与无敌帧在 Enemy._advance_boss_phase，这里只做战场反馈。
+## ⚠️ 与 50% 狂暴同帧时（BossPUA）：先 rage 后 phase，两条播报先后写同一个中央 label，
+## 最终显示阶段文案（「它暴走了」的语义由阶段横幅承接）—— 刻意不做互斥，见 Stats.BOSS_PHASES。
+func _on_boss_phase(phase: int, total: int, pos: Vector2) -> void:
+	shake(GameStats.BOSS_PHASE_SHAKE)
+	hud.show_center_notice("BOSS 阶段 %d/%d！" % [phase, total], GameStats.BOSS_PHASE_NOTICE_TIME)
+	feedback.spawn_burst(pos, Color(1.0, 0.45, 0.25), true)
+	_on_sfx_requested("kill", -2.0, 0.6)
+	if _testing():
+		print("[%s] Boss 转阶段：%d/%d（pos=%s）" % [_test_tag(), phase, total, str(pos)])
 
 
 func _on_boss_summon(pos: Vector2, type_name: String, count: int) -> void:
@@ -949,15 +1067,38 @@ func _maybe_open_queued_upgrade() -> void:
 func _open_upgrade(reason: String) -> void:
 	state = State.UPGRADE
 	_current_reason = reason
-	_generate_options()
-	var text := "升级强化" if reason == "level" else "本波结束，选择强化后进入下一波"
+	_reroll_extra_cards = 0   # 新的一组三选一：清掉「跨重抽保留的额外选项数」
 	# 暂停整棵树：否则玩家在选强化的时候还在挨打（弹出即暴毙）。
 	# 面板自己设了 PROCESS_MODE_WHEN_PAUSED，暂停时它照样能响应；
 	# 解除暂停也由面板负责（select / hide_panel 里），这里不用管。
 	get_tree().paused = true
 	if audio != null and reason == "level":
 		audio.play("levelup", -4.0)
+	_present_upgrade_options()
+
+
+## 生成三选一并喂给面板（首开与重抽共用出口 —— 重抽 = 原地重新调用本函数）。
+## 不碰 state / 音频 / 暂停：那些是「首开进入升级场景」的事；重抽发生在面板已开、
+## 树已暂停、流程已挂起的时点上，重复执行会打乱流程。
+func _present_upgrade_options() -> void:
+	_generate_options()
+	var text := "升级强化" if _current_reason == "level" else "本波结束，选择强化后进入下一波"
 	upgrade_panel.show_options(_current_options, wave_num, text, _on_upgrade_chosen, _testing())
+	# 重抽按钮（2026-10-08 旗舰批次）：次数来自 Player.rerolls_left（每局 UPGRADE_REROLLS 次）。
+	# 必须在 show_options 之后 —— 那里会把按钮重置为隐藏（防宝箱场景残留）。
+	upgrade_panel.set_reroll(player.rerolls_left, _on_upgrade_reroll)
+
+
+## 升级三选一重抽（2026-10-08 旗舰批次）：消耗 1 次机会把当前三选一整体重摇。
+## 只有「升级」场景能重抽（宝箱奖励不走本链路 —— 每张都有价值，不需要重抽）。
+## 重抽不扣「敌人代价」叠层：代价只有玩家真正选卡后才入账（_apply_enemy_cost）。
+func _on_upgrade_reroll() -> void:
+	if state != State.UPGRADE or player.rerolls_left <= 0:
+		return
+	player.rerolls_left -= 1
+	_present_upgrade_options()
+	if audio != null:
+		audio.play("buy", -4.0, 0.12, 1.05)
 
 
 func _generate_options() -> void:
@@ -979,8 +1120,11 @@ func _generate_options() -> void:
 	avail.shuffle()
 	# 选项数 = 基础值 + 角色天赋加成（学习嘉豪 +1）+ 预知未来额外选项（2026-09-20 扩充，
 	# 与天赋叠加；消费后清零 —— 「下次升级」语义）。
-	var extra_cards: int = player.extra_card_pending
-	if extra_cards > 0:
+	# 2026-10-08 重抽：额外选项数在本组生命周期内跨重抽保留（_reroll_extra_cards），
+	# 否则玩家重抽一次就把预知未来的 +1 丢掉 —— 重抽不能越摇越亏。
+	var extra_cards: int = player.extra_card_pending + _reroll_extra_cards
+	if player.extra_card_pending > 0:
+		_reroll_extra_cards = player.extra_card_pending
 		player.extra_card_pending = 0
 	var count := GameStats.UPGRADE_OPTIONS \
 		+ int(GameStats.character(player.char_id)["upgrade_opt_bonus"]) + extra_cards
@@ -1000,6 +1144,17 @@ func _generate_options() -> void:
 			and randf() < GameStats.EXTRA_WEAPON_CARD_RATE:
 		wslot = randi() % pick.size()
 		pick[wslot] = wcards[randi() % wcards.size()]
+	# ---- 武器融合卡（2026-10-08 第二梯队）----
+	# 条件：主武器【已进化】+ 配方副武器【满级】+ 本局未融合 → 【必现】结束替换（独占末槽）。
+	# 「必现」而不是概率：两个条件本身就是大后期门槛，凑齐了就该给（不做随机二次门槛）。
+	# 零随机消耗（直接落槽）⇒ 未满足条件的进程（自检/平衡/探针）随机流逐位不变。
+	# ⚠️ 与武器精通补卡天然互斥（融合要求已进化、精通补卡要求未进化），插入顺序无关。
+	var fcard := _fusion_card()
+	if not fcard.is_empty() and not pick.is_empty():
+		var fslot := pick.size() - 1
+		if fslot == wslot and fslot > 0:
+			fslot -= 1   # 不覆盖副武器卡槽（与 _apply_forced_upgrade 同一护栏）
+		pick[fslot] = fcard
 	# 武器进化可达性升级（2026-09-20，用户拍板全选四方案之二）：
 	# 卡池 12 条均匀抽 3，武器精通单次出现率仅 25%，实测多数局凑不满 6 层 —— 进化形同虚设。
 	#   A. 波末保底：未进化时每波波末必含一张武器精通（选不选仍由玩家决定）；
@@ -1085,6 +1240,42 @@ func _refresh_hud_extra() -> void:
 	for id in ids:
 		levels[id] = extra.level_of(id)
 	hud.set_extra_weapons(ids, levels)
+
+
+## 融合卡（2026-10-08 第二梯队）。返回空字典 = 当前不满足出现条件：
+##   · 主武器未进化（精通未满 6 层）  → 不给（融合是第二形态之后的第三条线）
+##   · 配方副武器未持有 / 未满级      → 不给（「材料」必须齐）
+##   · 本局已经融合过                 → 不给（一次性；重开一局随 Player.reset 复原）
+## 卡面：name = 融合名、display = 效果描述（数值与 Stats.FUSION_* 同口径，见表头注释）。
+## weapon_id 挂配方副武器 —— 图标沿用副武器图标（融合专属图标未入库，将来补）。
+func _fusion_card() -> Dictionary:
+	if player == null or extra == null:
+		return {}
+	if not player.weapon_evolved or player.fusion_id != "":
+		return {}
+	# 配方键 = weapon_id()（2026-10-09 武器自由）：融合是「主武器 × 副武器」，
+	# 主武器被替换后配方跟着替换武器走（未覆盖时 == char_id，与旧行为逐位一致）。
+	var fid := String(player.weapon_id())
+	var f: Dictionary = GameStats.weapon_fusion(fid)
+	if f.is_empty():
+		return {}
+	var eid := String(f["extra"])
+	var mx := GameStats.extra_weapon_max_level(eid)
+	if mx <= 0 or extra.level_of(eid) < mx:
+		return {}
+	var card: Dictionary = {
+		"id": "fusion_%s" % fid, "kind": "fusion", "fusion_id": fid,
+		"name": "武器融合　·　%s" % String(f["name"]),
+		"weapon_id": eid, "cost_tier": 3, "pct": false,
+		"tiers": [0.0, 0.0, 0.0],
+		"display": String(f["desc"]),
+	}
+	# 波末卡与其它卡同一口径捆绑「敌人代价」（纯读叠层，无随机消耗）。
+	if _current_reason == "wave":
+		var cost: Dictionary = _pick_enemy_cost(3)
+		if not cost.is_empty():
+			card["cost"] = cost
+	return card
 
 
 ## 副武器升级卡（2026-09-22）。
@@ -1188,7 +1379,7 @@ func _open_shop() -> void:
 	else:
 		_coupon_active = false
 	shop_panel.open(wave_num, player.gold, _shop_discount_now(), _on_shop_closed, _testing(), items_owned,
-		player.weapon_level)
+		player.weapon_level, player.rarity_luck)
 
 
 ## 商店购买请求（由面板 purchased 信号发起）：校验余额 → 扣钱 → 应用 → 锁卡。
@@ -1202,18 +1393,613 @@ func _on_shop_purchased(item_id: String, price: int, index: int) -> void:
 	# 「刷新」道具（2026-09-20 商店扩充）：整批商品重抽 —— 不锁卡（新商品上来）、
 	# 已扣的钱不退；重抽沿用当前折扣与前置链状态。其余道具照旧锁卡防重复购买。
 	if item_id == "s_reroll":
-		shop_panel.reroll(_shop_discount_now(), items_owned, player.weapon_level)
+		shop_panel.reroll(_shop_discount_now(), items_owned, player.weapon_level, player.rarity_luck)
 	else:
 		shop_panel.mark_sold(index)
 	if audio != null:
 		audio.play("buy", -4.0)
 	shop_panel.refresh(player.gold)
+	# 主动道具可能刚被换上（apply_item → equip_active）—— 立刻点亮 HUD 槽，不等下一个节拍。
+	_refresh_hud_active()
 
 
 ## 离开商店 → 下一波
 func _on_shop_closed() -> void:
 	get_tree().paused = false
 	start_next_wave()
+
+
+# ================================================================ 无尽里程碑（2026-10-08 第二梯队·无尽 2.0）
+## 无尽里程碑补给：波 >20 的 5 倍数波清完 → 金币（随波成长）；每 10 波附加一件道具
+## （走宝箱三选一链，_chest_pending += 1）。由 WaveDirector.end_wave 在宝箱分派【之前】
+## 调用 —— 里程碑排的宝箱被同一分派链立刻消化。
+## 开关与规则共用 endless_rules_enabled（selftest / selftest-defeat 下整体禁用，保基线）。
+func _grant_endless_milestone(wave: int) -> void:
+	if not GameStats.endless_rules_enabled:
+		return
+	if not GameSession.endless or not GameStats.is_endless_milestone(wave):
+		return
+	var amount := GameStats.endless_milestone_gold(wave)
+	var before := player.gold
+	# add_gold 是入账唯一口（meta 财富强化 / 诅咒萧条都在那里乘）—— 补给同链。
+	# 读前后差显示【实际入账】（与商店钱袋同口径：一次性入账算「见钱眼开」1 层）。
+	player.add_gold(amount)
+	var gained := player.gold - before
+	feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
+		"里程碑补给 +%d" % gained, Color(1.0, 0.84, 0.0), true)
+	hud.show_center_notice("里程碑补给！", 2.0)
+	if audio != null:
+		audio.play("levelup", -3.0, 0.05, 1.1)
+	if GameStats.endless_milestone_has_chest(wave):
+		_chest_pending += 1
+	if _testing():
+		print("[%s] 无尽里程碑（波%d）：+%d 金%s" % [
+			_test_tag(), wave, gained, "，+1 道具宝箱" if GameStats.endless_milestone_has_chest(wave) else ""])
+
+
+# ================================================================ Boss 宝箱（2026-10-08 玩法增补批次）
+# 掉落与拾取在 CombatResolver（boss 死亡必掉 KIND_CHEST 掉落物）；本区负责面板/奖励/衔接。
+# 拾取后的两条路径（靠「场上还有没有活敌」区分）：
+#   · 战斗中拾取（Boss 死了但场上还有小弟/召唤物）→ 立即弹面板，选完回战斗；
+#   · 波末真空回收拾取（collect_all_pickups）→ 只记账，由 WaveDirector.end_wave
+#     在波末升级之前先弹宝箱面板（选完自动接回：升级 → 商店 → 下一波 / 结算）。
+func _on_chest_collected() -> void:
+	_chest_pending += 1
+	feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+		"BOSS 宝箱！", Color(1.0, 0.84, 0.0), true)
+	# 音效语义（2026-10-08 修正）：第三参 = 音高倍率，1.15 = 升调「开箱的惊喜感」
+	#（旧写法 1.15 会被当成 ±115% 的随机抖动，音高乱跳）。
+	_on_sfx_requested("levelup", -3.0, 1.15)
+	# 立即开面板的前提：战斗进行中 + 场上还有活敌（说明离波末还有段路）。
+	# 若场上已无活敌，说明稍后就会走 end_wave —— 留给波末链，避免面板被升级面板顶掉。
+	if state == State.FIGHTING and not get_tree().paused and _alive_enemy_count() > 0:
+		_open_chest_reward("fight")
+
+
+## 存活敌计数（不含已 is_dead 未释放的）。
+func _alive_enemy_count() -> int:
+	var n := 0
+	for e in enemies:
+		if is_instance_valid(e) and not e.is_dead:
+			n += 1
+	return n
+
+
+## 弹宝箱奖励面板（复用 UpgradePanel 的三选一底子；标题/选项都是宝箱语义）。
+## after ∈ "fight" / "wave" / "end" —— 选择完毕后的去向（见 _chest_on_closed）。
+## 由 _on_chest_collected（立即路径）或 WaveDirector.end_wave（波末链）调用。
+## 计数不够时静默返回（防重复开面板）。
+func _open_chest_reward(after: String) -> void:
+	if _chest_pending <= 0:
+		return
+	_chest_pending -= 1
+	_chest_after = after
+	state = State.UPGRADE
+	var opts := _chest_options()
+	if opts.is_empty():
+		_chest_on_closed()   # 防御：理论不可达（三选一恒有选项）
+		return
+	get_tree().paused = true
+	upgrade_panel.show_options(opts, wave_num, "BOSS 宝箱 · 选择一份奖励",
+		_on_chest_chosen, _testing(), "宝箱奖励！")
+
+
+## 三选一奖励卡：A 金币袋 / B 精选道具 / C 武器精通+1（已进化则换成生命赐福）。
+## 每张都保证有价值 —— 不出现「已满级/已进化」这类无效奖励卡。
+## 道具那张现抽现显示：卡面写的就是拿到手的那件（不是盲盒）。
+func _chest_options() -> Array:
+	var out: Array = []
+	# A. 金币袋（金额随波次增长，与发放同源 = GameStats.boss_chest_gold）
+	var gold: int = GameStats.boss_chest_gold(wave_num)
+	out.append({
+		"id": "chest_gold", "name": "金币袋", "kind": "chest_gold", "amount": gold,
+		"icon_item": "gold_bag", "display": "立即获得 %d 金币" % gold,
+	})
+	# B. 精选道具（池子见 GameStats.BOSS_CHEST_ITEM_POOL；已进化则剔除精通手册）
+	var pool: Array[String] = []
+	for id in GameStats.BOSS_CHEST_ITEM_POOL:
+		var iid := String(id)
+		if iid == "weapon_mastery_book" and bool(player.weapon_evolved):
+			continue
+		if not GameStats.ITEM_DEFS.has(iid):
+			continue
+		pool.append(iid)
+	if not pool.is_empty():
+		var pick := pool[GameStats.rng_global().randi() % pool.size()]
+		var d: Dictionary = GameStats.ITEM_DEFS[pick]
+		out.append({
+			"id": "chest_item", "name": String(d["name"]), "kind": "chest_item",
+			"item_id": pick, "icon_item": pick, "display": String(d["desc"]),
+		})
+	# C. 武器精通 +1；已进化 → 生命赐福（不给无效卡）
+	if int(player.weapon_level) < GameStats.WEAPON_EVOLVE_LEVEL:
+		out.append({
+			"id": "chest_mastery", "name": "武器精通 +1", "kind": "chest_mastery",
+			"icon_item": "weapon_mastery_book",
+			"display": "进化进度 %d/%d · 每层附赠攻击 +%d" % [
+				int(player.weapon_level), GameStats.WEAPON_EVOLVE_LEVEL,
+				int(GameStats.WEAPON_MASTERY_STACK_ATK)],
+		})
+	else:
+		out.append({
+			"id": "chest_vigor", "name": "生命赐福", "kind": "chest_vigor",
+			"icon_item": "mega_hp_potion",
+			"display": "生命上限 +30 并回满生命",
+		})
+	return out
+
+
+## 宝箱奖励发放（**唯一出口**）。发放后统一走 _chest_on_closed 衔接后续流程。
+func _on_chest_chosen(opt: Dictionary, _index: int) -> void:
+	match String(opt.get("kind", "")):
+		"chest_gold":
+			var amount := int(opt.get("amount", 0))
+			player.add_gold(amount)
+			feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+				"+%d 金币" % amount, Color(1.0, 0.84, 0.0), true)
+		"chest_item":
+			var iid := String(opt.get("item_id", ""))
+			# ⚠️ 刻意【不】写进 items_owned（A4 前置链只认「商店购买」口径）——
+			# 宝箱直接把道具给到手上，不该改变后续商店的前置解锁节奏。
+			player.apply_item(iid)
+			feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+				"获得：%s" % String(GameStats.ITEM_DEFS[iid]["name"]), Color(1.0, 0.85, 0.35), true)
+		"chest_mastery":
+			player.apply_upgrade("weapon_mastery", GameStats.WEAPON_MASTERY_STACK_ATK)
+			feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+				"武器精通 +1", Color(0.72, 0.9, 1.0), true)
+		"chest_vigor":
+			player.apply_upgrade("hp", 30.0)
+			player.heal(float(player.max_hp))
+			feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+				"生命赐福！", Color(0.6, 0.95, 0.6), true)
+		_:
+			pass
+	if audio != null:
+		audio.play("buy", -3.0)
+	_chest_on_closed()
+
+
+## 宝箱面板关闭后的去向（与 _chest_after 配套的唯一分派点）。
+func _chest_on_closed() -> void:
+	var after := _chest_after
+	# 防御：若还有堆积的宝箱（正常流程不可能 —— 每波最多一只 Boss），先依次开完再走去向。
+	if _chest_pending > 0:
+		_open_chest_reward(after)
+		return
+	_chest_after = ""
+	match after:
+		"wave":
+			_open_upgrade("wave")   # 波末链：宝箱 → 升级 → 商店 → 下一波
+		"end":
+			_end_run(true)          # 最后一波 Boss：宝箱 → 通关结算
+		_:
+			state = State.FIGHTING  # 战斗中拾取：回战斗
+			_maybe_open_queued_upgrade()
+
+
+## 残敌清场加速（2026-10-08）：投放窗口关闭 + 场上只剩 ≤STRAGGLER_MAX_COUNT 只
+## 活敌（不含 Boss）时，残敌进入「追击」状态 —— 全体提速 + 远程解除保持距离，
+## 把「追最后几只」的跑图时间压下来。条件不满足时自动撤销（提速靠到期自然消退）。
+## 节流 STRAGGLER_REFRESH 秒一次（刷新式续杯；顺带把开关状态打印给测试观测）。
+func _tick_straggler_hunt(delta: float) -> void:
+	_straggler_t -= delta
+	if _straggler_t > 0.0:
+		return
+	_straggler_t = GameStats.STRAGGLER_REFRESH
+	var n := 0
+	var boss_alive := false
+	for e in enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		if e.behavior == "boss":
+			boss_alive = true
+		else:
+			n += 1
+	var hunt: bool = wave.spawn_window_closed() and not boss_alive and n > 0 \
+		and n <= GameStats.STRAGGLER_MAX_COUNT
+	for e in enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		e.straggler_hunt = hunt
+		if hunt and e.behavior != "boss":
+			e.apply_temp_speed(GameStats.STRAGGLER_SPEED_MUL, GameStats.STRAGGLER_TEMP_DUR)
+	if hunt != _straggler_on:
+		_straggler_on = hunt
+		if _testing():
+			print("[%s] 残敌追击（%s）：场上剩 %d 只（不含 Boss）" % [
+				_test_tag(), "开" if hunt else "关", n])
+
+
+# ================================================================ 主动道具（2026-10-08 旗舰批次）
+# 状态住在 Player（active_id / 冷却 / 冲刺计时），效果执行住在这里 —— 只有 Battle 同时
+# 握着 enemies / pickups / feedback。发动入口有三个：空格键、HUD 按钮、探针直调本函数。
+
+## 发动主动道具（唯一入口）。slot 1 = 空格 / 2 = F（第二槽，2026-10-09 meta 2.0 ——
+## 未解锁时 active_id_2 恒空 ⇒ ready(2) 恒 false ⇒ 静默，无需显式解锁判定）。
+## 未装备 / 冷却中 / 非战斗状态一律静默返回（无反馈 = 明确的「现在不能按」，
+## 比弹一个提示更不打扰）。发动成功后由本函数统一进冷却 + 刷 HUD。
+func _try_use_active(slot := 1) -> void:
+	if state != State.FIGHTING or player == null or not player.is_alive():
+		return
+	if not player.active_ready(slot):
+		return
+	var id: String = player.active_id_2 if slot == 2 else player.active_id
+	match id:
+		"active_nuke":
+			_do_active_nuke()
+		"active_speed_boots":
+			_do_active_speed_boots()
+		"active_time_stop":
+			_do_active_time_stop()
+		_:
+			return
+	player.active_start_cooldown(slot)
+	_refresh_hud_active()
+	_on_sfx_requested("levelup", -4.0, 1.2)
+
+
+## 核弹（肥嘟嘟核弹）：全屏小怪真秒杀、Boss 只吃 max_hp 的固定百分比（不秒杀）。
+## 小怪【击杀但掉落截断】（no_drop）—— Pentagram 式：清场不产经济，否则核弹 = 印钞机。
+## 伤害传 hp×100 而不是 hp：绕过「钢甲」词缀的受击乘区（take_damage 里 maxi(1,…) 下限
+## 拦不住百倍量级），保证 30 秒 CD 的大招对小怪不存在「打不死」的例外。
+func _do_active_nuke() -> void:
+	var pct := float(GameStats.ACTIVE_ITEMS["active_nuke"]["boss_dmg_pct"])
+	var killed := 0
+	for e in enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		if e.behavior == "boss":
+			e.take_damage(maxi(1, roundi(float(e.max_hp) * pct)))
+		else:
+			e.no_drop = true
+			if e.take_damage(e.hp * 100):
+				killed += 1
+	feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
+		"核弹！", Color(1.0, 0.45, 0.35), true)
+	feedback.play_evolution_nova(player.global_position)   # 全屏爆裂演出（复用进化 nova，零新资源）
+	shake()
+	_on_sfx_requested("kill", -2.0, 0.6)
+	if _testing():
+		print("[%s] 核弹发动：清掉 %d 只小怪" % [_test_tag(), killed])
+
+
+## 电动车冲刺：限时高速 + 全程无敌（无敌在 Player.start_active_rush 内一并给）。
+func _do_active_speed_boots() -> void:
+	var d: Dictionary = GameStats.ACTIVE_ITEMS["active_speed_boots"]
+	player.start_active_rush(float(d["rush_time"]), float(d["rush_speed_mul"]))
+	feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
+		"冲刺！", Color(0.45, 0.9, 1.0), true)
+	_on_sfx_requested("charger_dash", -4.0, 1.15)
+
+
+## 时间静止表：全屏冻结。Boss 折扣（时长减半）在 Enemy.freeze 内收口，不在此重复实现。
+func _do_active_time_stop() -> void:
+	var sec := float(GameStats.ACTIVE_ITEMS["active_time_stop"]["freeze_time"])
+	var n := 0
+	for e in enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		e.freeze(sec)
+		n += 1
+	feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
+		"时间静止！", Color(0.65, 0.8, 1.0), true)
+	_on_sfx_requested("dodge", -4.0, 0.85)
+	if _testing():
+		print("[%s] 时停发动：冻结 %d 只敌人 %.1fs" % [_test_tag(), n, sec])
+
+
+## 忧郁光环（2026-10-08）：slow_aura > 0 时以玩家为圆心、按 AURA_SLOW_REFRESH 节拍给
+## 半径内敌人【刷新式】续减速（不叠加：Enemy.apply_slow 取更慢乘区 + 更长时长，天然幂等）。
+func _aura_tick(delta: float) -> void:
+	if player == null or player.slow_aura <= 0.0:
+		return
+	_aura_t -= delta
+	if _aura_t > 0.0:
+		return
+	_aura_t = GameStats.AURA_SLOW_REFRESH
+	var mul := 1.0 - player.slow_aura
+	var r2 := GameStats.AURA_SLOW_RADIUS * GameStats.AURA_SLOW_RADIUS
+	for e in enemies:
+		if not is_instance_valid(e) or e.is_dead:
+			continue
+		if e.global_position.distance_squared_to(player.global_position) <= r2:
+			e.apply_slow(mul, GameStats.AURA_SLOW_DUR)
+
+
+## 主动道具槽状态变化（装备 / 发动 / 冷却归零）时立刻刷 HUD，不等 0.08s 节拍。
+## 与 _refresh_hud_extra 同为「先看 hud 是否在」的守卫式转发；Hud 侧指纹去重。
+func _refresh_hud_active() -> void:
+	if hud != null and player != null:
+		hud.set_active_state(player)
+
+
+# ================================================================ 局内事件系统（2026-10-08 第二梯队）
+# 波内低频随机事件：献祭祭坛 / 黑市商人 / 限时挑战柱 / 宝箱怪。
+# 分工：实体表现住 BattleEvent（纯视觉 + armed 标志）；触发判定 / 面板 / 奖励全在本类。
+# 随机消耗纪律：自检 / 平衡 / 探针进程【不生成】事件（见 _maybe_spawn_event 的守卫），
+# 探针手动调 _spawn_event / _spawn_mimic_item 来测 —— 确定性基线零污染。
+
+## 开波时按概率生成事件。守卫顺序 = 新手保护 → 场上唯一 → 概率 → 类型。
+func _maybe_spawn_event() -> void:
+	if _testing() or _probe_process():
+		return                 # 自检/平衡/探针：不生成（随机流与清场判定零污染）
+	if wave_num < int(GameStats.EVENT_MIN_WAVE):
+		return                 # 波 1-2 新手保护期
+	if not events.is_empty():
+		return                 # 场上同时最多 1 个事件实体
+	if randf() >= float(GameStats.EVENT_SPAWN_CHANCE):
+		return
+	if randf() < float(GameStats.EVENT_MIMIC_CHANCE):
+		_spawn_mimic_item()
+		return
+	var kind := String(GameStats.EVENT_KINDS[randi() % GameStats.EVENT_KINDS.size()])
+	_spawn_event(kind)
+
+
+## 生成事件实体（祭坛 / 黑市 / 挑战柱）。
+func _spawn_event(kind: String) -> void:
+	var ev := BattleEvent.new()
+	world.add_child(ev)
+	ev.setup(kind, _pick_event_pos())
+	events.append(ev)
+
+
+## 生成「宝箱怪」掉落物（伪装成宝箱的 Pickup；踩到才现形，见 combat.mimic_revealed）。
+func _spawn_mimic_item() -> void:
+	combat.spawn_pickup(Pickup.KIND_MIMIC, 0, _pick_event_pos())
+
+
+## 事件实体的落点：围绕玩家 EVENT_SPAWN_DIST_MIN~MAX 采样，避开障碍物、钳进场内。
+## 24 次采样全撞障碍/边界的极端情况回落到「玩家正右方最小距离」（保证有落点）。
+func _pick_event_pos() -> Vector2:
+	var arena := GameStats.arena_rect().grow(-80.0)
+	for i in 24:
+		var ang := randf() * TAU
+		var r := randf_range(float(GameStats.EVENT_SPAWN_DIST_MIN),
+			float(GameStats.EVENT_SPAWN_DIST_MAX))
+		var p := player.global_position + Vector2(cos(ang), sin(ang)) * r
+		p = Vector2(clampf(p.x, arena.position.x, arena.end.x),
+			clampf(p.y, arena.position.y, arena.end.y))
+		if not wave.inside_obstacle(p):
+			return p
+	return player.global_position + Vector2(float(GameStats.EVENT_SPAWN_DIST_MIN), 0.0)
+
+
+## 每帧事件判定：限时挑战计时 + 触发距离检测（含「离开后走开 re-arm」）。
+func _tick_events(delta: float) -> void:
+	if _challenge_active:
+		_tick_challenge(delta)
+	if events.is_empty() or not player.is_alive():
+		return
+	var ppos := player.global_position
+	for ev in events:
+		if not is_instance_valid(ev):
+			continue
+		var d := ppos.distance_to(ev.global_position)
+		if not ev.armed:
+			# re-arm：玩家走开 TRIGGER×REARM 之外后才允许再次触发（防「离开」后立刻重弹）
+			if d > float(GameStats.EVENT_TRIGGER_DIST) * float(GameStats.EVENT_REARM_MUL):
+				ev.armed = true
+			continue
+		if d <= float(GameStats.EVENT_TRIGGER_DIST):
+			_trigger_event(ev)
+			break              # 一帧最多触发一个（面板弹出即暂停，不连环弹）
+
+
+## 触发事件：飘字报名字 + 按 kind 开对应面板。面板回调经 _pending_event 找回实体。
+func _trigger_event(ev: BattleEvent) -> void:
+	ev.armed = false
+	_pending_event = ev
+	feedback.spawn_float(ev.global_position + Vector2(0.0, -78.0),
+		ev.display_name(), ev.color(), true)
+	match ev.kind:
+		"altar":
+			_open_altar()
+		"market":
+			_open_black_market()
+		"pillar":
+			_open_pillar_confirm()
+		_:
+			pass
+
+
+## 消费事件实体（用掉即消失：淡出自毁 + 出列）。由「成交 / 开完店 / 开挑战」的出口调用。
+func _consume_event(ev: BattleEvent) -> void:
+	if ev == null:
+		return
+	events.erase(ev)
+	_pending_event = null
+	if is_instance_valid(ev):
+		ev.consume()
+
+
+## 「离开」类面板的通用回调（祭坛 / 挑战柱）：面板已自收尾（hide_panel 解除了暂停），
+## 这里只把流程状态接回战斗。事件实体保留 —— 玩家走开再回来可重新触发。
+func _on_panel_skip() -> void:
+	state = State.FIGHTING
+	_maybe_open_queued_upgrade()
+
+
+## 波末 / 重开：清掉场上全部事件实体；进行中的限时挑战按当前击杀立即结算。
+## （挑战没打满时间就过波 = 援军已被清光，成绩照算、努力不白费；未踩的宝箱怪静默收走。）
+func _free_all_events() -> void:
+	if _challenge_active:
+		_end_challenge()
+	for ev in events:
+		if is_instance_valid(ev):
+			ev.queue_free()
+	events.clear()
+	_pending_event = null
+
+
+# ---------------------------------------------------------------- 献祭祭坛
+## 献祭祭坛：两笔交易（血祭 / 金祭），金币不足时金祭不出现；「离开」保留祭坛。
+func _open_altar() -> void:
+	state = State.UPGRADE
+	get_tree().paused = true
+	var opts: Array = []
+	opts.append({
+		"id": "altar_blood", "name": "血之献祭", "kind": "altar_blood",
+		"icon_item": "vampire_fang",
+		"display": "获得 %d 件随机道具" % int(GameStats.ALTAR_ITEM_COUNT),
+		"cost": {"name": "失去当前生命的 %d%%" % roundi(float(GameStats.ALTAR_HP_COST_RATIO) * 100.0)},
+	})
+	if player.gold >= int(GameStats.ALTAR_GOLD_MIN):
+		opts.append({
+			"id": "altar_gold", "name": "金之献祭", "kind": "altar_gold",
+			"icon_item": "gold_bag",
+			"display": "武器精通 +%d 层" % int(GameStats.ALTAR_MASTERY_STACKS),
+			"cost": {"name": "失去当前金币的 %d%%" % roundi(float(GameStats.ALTAR_GOLD_COST_RATIO) * 100.0)},
+		})
+	upgrade_panel.show_options(opts, wave_num, "献出代价，换取力量", _on_altar_chosen,
+		_testing(), "献祭祭坛")
+	upgrade_panel.set_skip("离开", _on_panel_skip)
+
+
+## 祭坛成交（唯一出口）：执行代价与收益 → 消费祭坛 → 回战斗。
+func _on_altar_chosen(opt: Dictionary, _index: int) -> void:
+	match String(opt.get("kind", "")):
+		"altar_blood":
+			# 扣当前生命的比例（保底 1 点 —— 献祭不致死）。代价 = 濒死线的压迫感。
+			player.hp = maxf(1.0, player.hp * (1.0 - float(GameStats.ALTAR_HP_COST_RATIO)))
+			var picks := GameStats.altar_item_roll(int(GameStats.ALTAR_ITEM_COUNT))
+			for iid in picks:
+				player.apply_item(iid)
+				feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+					"获得：%s" % String(GameStats.ITEM_DEFS[iid]["name"]),
+					Color(1.0, 0.85, 0.35), true)
+		"altar_gold":
+			player.gold -= int(float(player.gold) * float(GameStats.ALTAR_GOLD_COST_RATIO))
+			for i in int(GameStats.ALTAR_MASTERY_STACKS):
+				player.apply_upgrade("weapon_mastery", GameStats.WEAPON_MASTERY_STACK_ATK)
+			feedback.spawn_float(player.global_position + Vector2(0.0, -48.0),
+				"武器精通 +%d" % int(GameStats.ALTAR_MASTERY_STACKS), Color(0.72, 0.9, 1.0), true)
+		_:
+			pass
+	if audio != null:
+		audio.play("buy", -3.0, 0.1, 0.9)
+	_consume_event(_pending_event)
+	state = State.FIGHTING
+	_maybe_open_queued_upgrade()
+
+
+# ---------------------------------------------------------------- 黑市商人
+## 黑市：波内商店（复用 ShopPanel 的 "black_market" 模式）—— 贵、稀有、错过就没有。
+func _open_black_market() -> void:
+	state = State.SHOP
+	get_tree().paused = true
+	shop_panel.open(wave_num, player.gold, 1.0, _on_black_market_closed, _testing(),
+		items_owned, player.weapon_level, player.rarity_luck, "black_market")
+
+
+## 黑市关闭（买完 / 离开都算）：消费事件实体（一锤子买卖）→ 回战斗。
+func _on_black_market_closed() -> void:
+	_consume_event(_pending_event)
+	state = State.FIGHTING
+	_maybe_open_queued_upgrade()
+
+
+# ---------------------------------------------------------------- 限时挑战柱
+## 挑战柱确认面板：「开始挑战」卡 + 「下次再说」（离开保留柱子，走开再回来可重弹）。
+func _open_pillar_confirm() -> void:
+	state = State.UPGRADE
+	get_tree().paused = true
+	var opts: Array = [{
+		"id": "challenge_go", "name": "开始挑战", "kind": "challenge_go",
+		"icon_item": "iron_fist",
+		"display": "%d 秒内击杀 %d 只敌人 → %d 金币 + 1 件道具\n（击杀 %d 只以上 → %d 金币）" % [
+			int(GameStats.CHALLENGE_TIME), int(GameStats.CHALLENGE_FULL_KILLS),
+			int(GameStats.CHALLENGE_FULL_GOLD), int(GameStats.CHALLENGE_HALF_KILLS),
+			int(GameStats.CHALLENGE_HALF_GOLD)],
+	}]
+	upgrade_panel.show_options(opts, wave_num, "限时挑战：援军已在路上", _on_pillar_confirm_chosen,
+		_testing(), "挑战柱")
+	upgrade_panel.set_skip("下次再说", _on_panel_skip)
+
+
+## 确认开挑战：消费柱子 → 环形刷援军 → 启动计时。援军不占本波投放名额。
+func _on_pillar_confirm_chosen(_opt: Dictionary, _index: int) -> void:
+	var cpos := player.global_position
+	if _pending_event != null and is_instance_valid(_pending_event):
+		cpos = _pending_event.global_position
+	_consume_event(_pending_event)
+	_challenge_active = true
+	_challenge_left = float(GameStats.CHALLENGE_TIME)
+	_challenge_base_kills = kills
+	_challenge_dead = 0
+	_challenge_notice_sec = -1
+	var arena := GameStats.arena_rect().grow(-60.0)
+	var types: Array = GameStats.spawn_types(wave_num)
+	for i in int(GameStats.CHALLENGE_ENEMY_COUNT):
+		var ang := TAU * float(i) / float(GameStats.CHALLENGE_ENEMY_COUNT) + randf() * 0.6
+		var p := cpos + Vector2(cos(ang), sin(ang)) * float(GameStats.CHALLENGE_RING_RADIUS)
+		p = Vector2(clampf(p.x, arena.position.x, arena.end.x),
+			clampf(p.y, arena.position.y, arena.end.y))
+		wave.spawn_enemy(String(types[randi() % types.size()]), p, 1.0, false)
+	feedback.spawn_float(cpos + Vector2(0.0, -78.0), "挑战开始！", Color(1.0, 0.78, 0.3), true)
+	shake()
+	if audio != null:
+		audio.play("wave", -4.0, 0.1, 1.15)
+	state = State.FIGHTING
+	_maybe_open_queued_upgrade()
+
+
+## 挑战计时（每帧，由 _tick_events 驱动）：整秒刷新中央通告；归零结算。
+func _tick_challenge(delta: float) -> void:
+	_challenge_left -= delta
+	_challenge_dead = maxi(0, kills - _challenge_base_kills)
+	var sec := ceili(_challenge_left)
+	if sec != _challenge_notice_sec and _challenge_left > 0.0:
+		_challenge_notice_sec = sec
+		hud.show_center_notice("限时挑战 · 剩 %d 秒 · 已击杀 %d/%d" % [
+			sec, _challenge_dead, int(GameStats.CHALLENGE_FULL_KILLS)], 1.4)
+	if _challenge_left <= 0.0:
+		_end_challenge()
+
+
+## 挑战结算（唯一出口）：按击杀数发奖 → 清态。时间到与波末强制收尾共用。
+func _end_challenge() -> void:
+	_challenge_active = false
+	var k := _challenge_dead
+	var gold := 0
+	var full := k >= int(GameStats.CHALLENGE_FULL_KILLS)
+	if full:
+		gold = int(GameStats.CHALLENGE_FULL_GOLD)
+	elif k >= int(GameStats.CHALLENGE_HALF_KILLS):
+		gold = int(GameStats.CHALLENGE_HALF_GOLD)
+	var label := ""
+	if full:
+		var picks := GameStats.altar_item_roll(1)
+		label = "挑战达成！+%d 金币" % gold
+		if not picks.is_empty():
+			player.apply_item(picks[0])
+			label += " ＋ %s" % String(GameStats.ITEM_DEFS[picks[0]]["name"])
+	elif gold > 0:
+		label = "挑战过半 +%d 金币（击杀 %d）" % [gold, k]
+	else:
+		label = "挑战失败……（击杀 %d）" % k
+	if gold > 0:
+		player.add_gold(gold)
+	hud.show_center_notice(label, 2.6)
+	feedback.spawn_float(player.global_position + Vector2(0.0, -64.0), label,
+		Color(1.0, 0.78, 0.3) if gold > 0 else Color(0.7, 0.7, 0.75), false)
+	if _testing():
+		print("[%s] 限时挑战结算：击杀 %d（全奖线 %d）→ %s" % [
+			_test_tag(), k, int(GameStats.CHALLENGE_FULL_KILLS), label])
+
+
+# ---------------------------------------------------------------- 宝箱怪
+## 宝箱怪现形（唯一出口）：假宝箱被踩 → 原位刷 Mimic 敌人（不占投放名额、不额外消耗波池）。
+## 位置就是被开的宝箱处 —— 「它一直蹲在这里等你」。
+func _on_mimic_revealed(pos: Vector2) -> void:
+	if state == State.RESULT:
+		return
+	wave.spawn_enemy("Mimic", pos, 1.0, false)
+	feedback.spawn_float(pos + Vector2(0.0, -52.0), "宝箱怪！",
+		Color(GameStats.EVENT_DEFS["mimic"]["color"]), true)
+	shake()
+	_on_sfx_requested("split", -3.0, 0.65)
 
 
 func _on_upgrade_chosen(opt: Dictionary, _index: int) -> void:
@@ -1234,9 +2020,20 @@ func _on_upgrade_chosen(opt: Dictionary, _index: int) -> void:
 			if extra.level_up(wid2):
 				feedback.spawn_float(player.global_position + Vector2(0.0, -58.0),
 					"%s Lv%d" % [String(GameStats.EXTRA_WEAPON_DEFS[wid2]["name"]),
-						extra.level_of(wid2)],
+					extra.level_of(wid2)],
 					Color(1.0, 0.85, 0.35), true)
 				_refresh_hud_extra()   # 立刻多亮一格等级点
+		"fusion":
+			# 武器融合（2026-10-08 第二梯队）：融合 id 落到 Player，ExtraWeaponSystem
+			# 每个钩子实时读 player.fusion_id ⇒ 选完【立刻生效】，不需要 recalc / 重挂。
+			# 副武器保留（不消耗）—— 融合是奖励不是献祭。
+			player.fusion_id = String(opt["fusion_id"])
+			var fdef: Dictionary = GameStats.WEAPON_FUSIONS[player.fusion_id]
+			feedback.spawn_float(player.global_position + Vector2(0.0, -72.0),
+				"武器融合：%s！" % String(fdef["name"]), Color(1.0, 0.72, 0.30), true)
+			if audio != null:
+				# 4 参签名：音量 / 抖动小 / 音高 ×1.25（比升级更高亢 —— 这是本局的巅峰时刻）
+				audio.play("levelup", -2.0, 0.03, 1.25)
 		_:
 			player.apply_upgrade(opt["id"], GameStats.upgrade_value(opt, wave_num))
 	upgrade_taken_count += 1
@@ -1269,6 +2066,15 @@ func _end_run(victory: bool) -> void:
 		player.gold += salvage
 		feedback.spawn_float(player.global_position + Vector2(0.0, -64.0),
 			"回收 +%d" % salvage, Color(1.0, 0.84, 0.0), false)
+	# 商店券结算回收（2026-10-08 旗舰批次）：局终时刻手上未消费的券按 COUPON_SALVAGE_GOLD
+	# 折成金币 —— 修「决战前捡到的券在通关局里白丢」。与金币回收同口径：必须在
+	# record_run 之前入账（账本记录的就是回收后的最终金币）。
+	if player.shop_coupon > 0:
+		var coupon_gold := player.shop_coupon * GameStats.COUPON_SALVAGE_GOLD
+		player.gold += coupon_gold
+		player.shop_coupon = 0
+		feedback.spawn_float(player.global_position + Vector2(0.0, -88.0),
+			"商店券回收 +%d" % coupon_gold, Color(1.0, 0.85, 0.35), false)
 	# 局外账本入账（A2/A6 迭代）：最佳波次 / 累计击杀 / 累计金币，跨局持久化。
 	# 2026-09-20 无尽体验：无尽局额外更新 best_endless_wave；入账前先读旧纪录，
 	# 阵亡时若超过旧纪录 → 结算页标「新纪录」。
@@ -1276,11 +2082,32 @@ func _end_run(victory: bool) -> void:
 	var endless_best_before := 0
 	if GameSession.endless:
 		endless_best_before = int(MetaSave.ledger()["best_endless_wave"])
+	# 每日种子局（2026-10-09 meta 2.0 第二批）：先读当日纪录（跨天自动作废为 0），
+	# 入账后与新成绩对照 —— 结算页标「当日新纪录」。测试/探针进程照旧不入账。
+	var daily_best_before := 0
+	if GameSession.daily_mode:
+		daily_best_before = MetaSave.daily_best()
+	## 本局新解锁的成就（空数组 = 无）。透给结算页展示；测试/探针进程恒为空。
+	var new_achievements: Array = []
 	if not _testing() and not _probe_process():
-		MetaSave.record_run(victory, waves_completed, kills, player.gold, GameSession.endless)
+		# 成就批次（2026-10-08）：char_id / difficulty / evolutions 三个统计维度随局入账
+		# （每角色通关数 / 困难胜场 / 武器进化次数），全部走可选参数 —— 旧行为不变。
+		# 开局诅咒（2026-10-08 第二梯队）：第 9 参 xp_mul = 结算 meta XP ×(1+0.25×诅咒条数)；
+		# 0 条 = 1.0，账本数值逐位不变。
+		MetaSave.record_run(victory, waves_completed, kills, player.gold, GameSession.endless,
+			player.char_id, GameStats.difficulty_key(),
+			1 if bool(player.weapon_evolved) else 0,
+			GameStats.curse_xp_mul())
 		# 敌人图鉴（2026-09-22）：本局每类敌人的击杀数并入图鉴账本（累计 + 解锁）。
 		# 与 record_run 同一个守卫 —— 自检/探针进程同样不写图鉴档（保证门禁不污染玩家存档）。
 		MetaSave.record_kills(enemy_kills)
+		# 成就检查（2026-10-08）：**必须在 record_run + record_kills 之后** ——
+		# 判定数据（累计击杀/图鉴/通关数）此刻才是最新；新解锁透给结算页。
+		new_achievements = MetaSave.check_achievements()
+		# 每日挑战当日纪录（2026-10-09 meta 2.0 第二批）：只记「今日最佳」，
+		# 跨天自动重置（daily_best 读侧同一判定）。与 record_run 同守卫。
+		if GameSession.daily_mode:
+			MetaSave.record_daily(waves_completed)
 	player.set_physics_process(false)
 	# 结算前清场：不然面板盖上来后，背景还站着一群静止的怪
 	_free_all_enemies()
@@ -1297,12 +2124,27 @@ func _end_run(victory: bool) -> void:
 		"level": player.level,
 		"gold": player.gold,
 		"difficulty": GameStats.difficulty_name(),
+		# 诅咒（2026-10-08 第二梯队）：条数 + 实际乘区 —— 结算页展示「这局为什么多拿点数」。
+		"curses": GameSession.curses.size(),
+		"curse_xp_mul": GameStats.curse_xp_mul(),
+		# 融合（2026-10-08 第二梯队·武器融合）：本局完成融合才给出名字，否则空串（面板省略该行）。
+		"fusion": String(GameStats.weapon_fusion(String(player.fusion_id)).get("name", "")) \
+			if String(player.fusion_id) != "" else "",
 		# 无尽体验（2026-09-20）：模式标记 + 历史最佳 + 是否破纪录（字段缺省时面板按普通局渲染，
 		# 旧调用方/探针零影响）。破纪录只认「真跑」——测试进程不入账，也谈不上破纪录。
 		"endless": GameSession.endless,
 		"endless_best": maxi(endless_best_before, waves_completed if GameSession.endless else 0),
 		"new_record": GameSession.endless and not _testing() and not _probe_process()
 			and waves_completed > endless_best_before,
+		# 成就批次（2026-10-08）：本局新解锁的成就（[{name, xp}...]）。
+		# 字段缺省时旧调用方/探针按「无成就」渲染 —— ResultPanel 有守卫。
+		"achievements": new_achievements,
+		# 每日种子局（2026-10-09 meta 2.0 第二批）：模式标记 + 当日最佳 + 是否破纪录
+		# （字段缺省时面板省略该行，旧调用方/探针零影响）。
+		"daily": GameSession.daily_mode,
+		"daily_best": maxi(daily_best_before, waves_completed if GameSession.daily_mode else 0),
+		"daily_new_record": GameSession.daily_mode and not _testing() and not _probe_process()
+			and waves_completed > daily_best_before,
 	})
 	hud.set_visible_hud(false)
 	# 结算即战斗结束：①作废挂起的 hit-stop 回调（否则它可能在结算后才触发，
@@ -1375,7 +2217,7 @@ func _finish_selftest() -> void:
 	print("[SELFTEST] --------------------------------------------------")
 	print("[SELFTEST] char=%s weapon=%s trait=%s difficulty=%s" % [
 		player.char_id,
-		GameStats.weapon_for_char(player.char_id)["name"],
+		GameStats.weapon_for_char(player.weapon_id())["name"],
 		player.trait_id if player.trait_id != "" else "(none)",
 		GameStats.difficulty_name(),
 	])
@@ -1497,6 +2339,22 @@ func _probe_process() -> bool:
 	return OS.get_cmdline_args().has("--script")
 
 
+## 每日种子局：把当日固定种子应用到全局随机流（2026-10-09 meta 2.0 第二批）。
+## 返回是否真的应用（探针断言守卫用）。三重守卫口径：
+##   · 非每日模式        → 不动（普通局保持引擎启动随机）；
+##   · 自检 / 平衡（_testing）→ 不动（四/六角色基线必须每次一致）；
+##   · 探针进程（--script）  → 不动（探针自己 seed(N) 做对照，绝不能被覆盖）。
+## 应用后「同一天 ⇒ 同一条随机序列」——这是每日挑战的产品承诺（探针以
+## 「同种子两次取数相同」的对照断言来钉住这条不变式）。
+func _apply_daily_seed() -> bool:
+	if not GameSession.daily_mode:
+		return false
+	if _testing() or _probe_process():
+		return false
+	seed(GameStats.daily_seed_value())
+	return true
+
+
 func _test_tag() -> String:
 	if selftest_defeat:
 		return "SELFTEST-DEFEAT"
@@ -1573,6 +2431,17 @@ func _clear_all() -> void:
 	enemies.clear()
 	projectiles.clear()
 	pickups.clear()
+	# 局内事件（2026-10-08 第二梯队）：实体 + 挑战态【静默】清除 —— 重开一局不留残留。
+	# 与波末的 _free_all_events 区别：这里进行中的挑战直接作废、不结算（这一局都不要了，
+	# 结算奖励毫无意义、还会在重开瞬间弹假飘字）。
+	for ev in events:
+		if is_instance_valid(ev):
+			ev.queue_free()
+	events.clear()
+	_pending_event = null
+	_challenge_active = false
+	_challenge_left = 0.0
+	_challenge_dead = 0
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1581,6 +2450,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		if state == State.FIGHTING and not get_tree().paused:
 			pause_menu.open()
 			get_viewport().set_input_as_handled()
+	# 主动道具（2026-10-08 旗舰批次）：空格 = use_item（project.godot 既有映射，初代设计
+	# 预留至今）。状态守卫在 _try_use_active 内 —— 暂停/选卡/结算时按空格一律无效。
+	elif event.is_action_pressed("use_item"):
+		if not get_tree().paused:
+			_try_use_active(1)
+	# 第二主动槽（2026-10-09 meta 2.0）：F = use_item_2。未解锁 / 空槽时 ready(2) 恒 false
+	# → 整条静默（不需要显式解锁判定，快照没解锁就不可能有第二件主动道具）。
+	elif event.is_action_pressed("use_item_2"):
+		if not get_tree().paused:
+			_try_use_active(2)
 	# not is_echo()：长按 R 会连发 echo 事件 —— 旧实现一次长按触发十几次整局重置
 	#（审查 P1）。只在首次按下响应，按住不重复。
 	elif event is InputEventKey and event.pressed and not event.is_echo() \
@@ -1658,6 +2537,95 @@ func _cycle_speed() -> void:
 func _update_speed_button() -> void:
 	if _speed_btn != null:
 		_speed_btn.text = "%.1fx" % speed_mul
+
+
+# ================================================================ 暂停菜单「本局构筑一览」数据
+## 数据提供者（2026-10-08 QoL 批次）：PauseMenu.build_provider 指向本函数。
+## PauseMenu 只管渲染，口径全部收口在这里 —— 属性读 Player、道具读 items_owned（去重计数、
+## 保持首次入手顺序）、副武器读 ExtraWeaponSystem、精通读 Player.weapon_level。
+## 返回：{
+##   "weapon": String（角色武器名）, "mastery": String（进化进度文案）,
+##   "stats": Array[ [名, 值] ... ], "items": Array[{id, name, count}...],
+##   "extras": Array[{id, name, level, max}...],
+## }
+func _build_overview_data() -> Dictionary:
+	var stats: Array = []
+	stats.append(["攻击力", "%d" % int(player.atk)])
+	stats.append(["生命", "%d / %d" % [ceili(player.hp), int(player.max_hp)]])
+	stats.append(["攻速", "×%.2f" % float(player.aspd)])
+	stats.append(["暴击率", "%d%%" % roundi(float(player.crit) * 100.0)])
+	stats.append(["暴击伤害", "×%.2f" % float(player.critd)])
+	stats.append(["护甲", "%d" % int(player.defense)])
+	stats.append(["闪避", "%d%%" % roundi(float(player.dodge) * 100.0)])
+	stats.append(["吸血", "%d%%" % roundi(float(player.lifesteal) * 100.0)])
+	stats.append(["移速", "%.0f" % float(player.spd)])
+	stats.append(["每秒回血", "%.1f" % float(player.hp_regen)])
+	stats.append(["金币收益", "%d%%" % roundi(float(player.harvest) * 100.0)])
+	stats.append(["冷却缩减", "%d%%" % roundi(float(player.cdr) * 100.0)])
+	stats.append(["拾取范围", "%.0f" % float(player.pickup_range)])
+	stats.append(["弹道数", "%d" % int(player.proj)])
+	# 道具：同名去重 + 计数，保持首次入手顺序（items_owned 是按购买先后追加的）。
+	var counts: Dictionary = {}
+	var order: Array[String] = []
+	for id in items_owned:
+		var iid := String(id)
+		if not counts.has(iid):
+			order.append(iid)
+		counts[iid] = int(counts.get(iid, 0)) + 1
+	var items: Array = []
+	for iid in order:
+		var nm := iid
+		if GameStats.ITEM_DEFS.has(iid):
+			nm = String(GameStats.ITEM_DEFS[iid]["name"])
+		items.append({"id": iid, "name": nm, "count": int(counts[iid])})
+	# 副武器
+	var extras: Array = []
+	if extra != null:
+		for id in extra.owned_ids():
+			var wid := String(id)
+			extras.append({
+				"id": wid,
+				"name": String(GameStats.EXTRA_WEAPON_DEFS[wid]["name"]),
+				"level": int(extra.level_of(wid)),
+				"max": int(GameStats.extra_weapon_max_level(wid)),
+			})
+	# 精通 / 进化 / 融合（融合 2026-10-08 第二梯队）：融合与二形态【叠加】显示。
+	# 形态名按 weapon_id()（2026-10-09 武器自由：替换后形态跟着替换武器走）。
+	var mastery := ""
+	if bool(player.weapon_evolved):
+		mastery = "已进化：%s" % String(
+			GameStats.weapon_evolution(String(player.weapon_id())).get("name", ""))
+	else:
+		mastery = "进化进度 %d/%d" % [int(player.weapon_level), int(GameStats.WEAPON_EVOLVE_LEVEL)]
+	if String(player.fusion_id) != "":
+		mastery += "　·　融合：%s" % String(
+			GameStats.weapon_fusion(String(player.fusion_id)).get("name", ""))
+	# 无尽战场规则（2026-10-08 第二梯队·无尽 2.0）：无尽 + 进过纪元才显示（名字 + 效果）。
+	var endless_rule_txt := ""
+	var era := GameStats.endless_era(wave_num)
+	if GameSession.endless and era >= 0:
+		var rule := GameStats.endless_rule(wave_num)
+		if not rule.is_empty():
+			endless_rule_txt = "第 %d 纪元 · %s —— %s" % [
+				era + 1, String(rule["name"]), String(rule["desc"])]
+	# 地图区域（2026-10-09 第二梯队·多地图）：图名 +（有机制时）机制短名与效果描述。
+	var region_txt := String(GameStats.floor_theme_for_wave(wave_num).get("name", ""))
+	var region_eff := GameStats.map_effect_name_for_wave(wave_num)
+	if region_eff != "":
+		region_txt += " · %s（%s）" % [region_eff, GameStats.map_effect_desc_for_wave(wave_num)]
+	return {
+		"weapon": String(GameStats.weapon_for_char(String(player.weapon_id()))["name"]),
+		"mastery": mastery,
+		"stats": stats,
+		"items": items,
+		"extras": extras,
+		# 2026-10-08 顺手修：PauseMenu 的 head 一直读这两个字段，但这里从没塞过 ——
+		# 「金币 0 · 第 0 波」的旧瑕疵一并修掉。
+		"gold": int(player.gold),
+		"wave": wave_num,
+		"endless_rule": endless_rule_txt,
+		"region": region_txt,
+	}
 
 
 ## 金手指调试面板的挂接点（2026-09-22）。加挂条件三重：

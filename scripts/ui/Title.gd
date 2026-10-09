@@ -89,8 +89,22 @@ func _build() -> void:
 	start.pressed.connect(_on_start)
 	box.add_child(start)
 
-	# 次级入口并排一行：局外强化（MetaSave 消费端第二片）/ 图鉴（2026-09-22）/ 设置（2026-09-22）
-	# 三个按钮 220 宽 + 2×16 间距 = 692px，在 1280 宽的窗口里仍居中留白充足。
+	# 每日挑战（2026-10-09 meta 2.0 第二批）：解锁 unlock_daily 后可用 ——
+	# 每天固定随机种子 + 普通难度，直接进选人（跳过难度层），冲击当日最佳。
+	# 未解锁时按钮灰化（自解释：去局外强化的解锁网络购买）。
+	var daily_btn := _make_button("每日挑战", 22)
+	if MetaSave.is_meta_unlocked("unlock_daily"):
+		var db := MetaSave.daily_best()
+		if db > 0:
+			daily_btn.text = "每日挑战（当日最佳 %d 波）" % db
+		daily_btn.pressed.connect(_pick_daily)
+	else:
+		daily_btn.disabled = true
+		daily_btn.text = "每日挑战（未解锁）"
+	box.add_child(daily_btn)
+
+	# 次级入口并排一行：局外强化（MetaSave 消费端第二片）/ 成就（2026-10-08）/ 图鉴（2026-09-22）
+	# / 设置（2026-09-22）。四个按钮 220 宽 + 3×16 间距 = 928px，在 1280 宽的窗口里仍居中留白充足。
 	var sub_row := HBoxContainer.new()
 	sub_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	sub_row.add_theme_constant_override("separation", 16)
@@ -100,6 +114,12 @@ func _build() -> void:
 	meta_btn.custom_minimum_size = Vector2(220, 48)
 	meta_btn.pressed.connect(_open_meta_shop)
 	sub_row.add_child(meta_btn)
+
+	# 成就 / 战绩（2026-10-08）：只读展示局外账本推导的成就解锁状态 + 全局战绩，不消耗资源。
+	var ach_btn := _make_button("成就", 22)
+	ach_btn.custom_minimum_size = Vector2(220, 48)
+	ach_btn.pressed.connect(_open_achievements)
+	sub_row.add_child(ach_btn)
 
 	# 敌人图鉴（2026-09-22，需求《敌人图鉴_给代码AI_2026-09-22.md》）：
 	# 只读展示局外账本里的「击杀过哪些怪 / 各杀了多少」，不消耗任何资源。
@@ -351,6 +371,24 @@ func _rebuild_shop(box: VBoxContainer) -> void:
 	for u in MetaSave.META_UPGRADES:
 		grid.add_child(_meta_shop_cell(u, d, box))
 
+	# 解锁网络（2026-10-09 meta 2.0）：一次性购买的「功能解锁」区 —— 与强化同货币、
+	# 同款自动遍历渲染（加解锁条目不用动 UI 代码）。买一次永久生效、不设叠层。
+	box.add_child(_spacer(6))
+	var unl_title := Label.new()
+	unl_title.text = "解锁网络"
+	unl_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	unl_title.add_theme_font_size_override("font_size", 22)
+	unl_title.add_theme_color_override("font_color", Color(0.80, 0.64, 0.98))
+	box.add_child(unl_title)
+
+	var ugrid := GridContainer.new()
+	ugrid.columns = 2
+	ugrid.add_theme_constant_override("h_separation", 20)
+	ugrid.add_theme_constant_override("v_separation", 8)
+	box.add_child(ugrid)
+	for u in MetaSave.META_UNLOCKS:
+		ugrid.add_child(_meta_unlock_cell(u, d, box))
+
 	box.add_child(_spacer(4))
 	var close := Button.new()
 	close.text = "关闭（Esc）"
@@ -423,6 +461,62 @@ func _level_pips(lvl: int, maxl: int) -> Control:
 	return row
 
 
+## 一格解锁（2026-10-09 meta 2.0）：名称 + 效果说明 + 解锁按钮 / 「已解锁」状态。
+## 样式与 _meta_shop_cell 同构（左信息右按钮），购买成功同样整体重建。
+func _meta_unlock_cell(u: Dictionary, d: Dictionary, box: VBoxContainer) -> Control:
+	var id := String(u["id"])
+	var unlocked := (d[MetaSave.UNLOCKS_META_KEY] as Array).has(id)
+
+	var cell := HBoxContainer.new()
+	cell.add_theme_constant_override("separation", 10)
+
+	# 图标（2026-10-09 美术入库）：48px；缺图自动跳过、不占位（绝不画白块）。
+	var ic_tex := AssetDB.unlock_icon(id)
+	if ic_tex != null:
+		var ic := TextureRect.new()
+		ic.texture = ic_tex
+		ic.custom_minimum_size = Vector2(48, 48)
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cell.add_child(ic)
+
+	var info := VBoxContainer.new()
+	info.add_theme_constant_override("separation", 2)
+	info.custom_minimum_size = Vector2(268, 0)
+	cell.add_child(info)
+
+	var name_lbl := Label.new()
+	name_lbl.text = String(u["name"])
+	name_lbl.add_theme_font_size_override("font_size", 17)
+	# 已解锁 = 金字（与满级强化同款「已到手」色）
+	name_lbl.add_theme_color_override("font_color",
+		Color("#FFD700") if unlocked else Color(0.90, 0.92, 0.98))
+	info.add_child(name_lbl)
+
+	var desc := Label.new()
+	desc.text = String(u["desc"])
+	desc.add_theme_font_size_override("font_size", 13)
+	desc.add_theme_color_override("font_color", Color(0.62, 0.67, 0.80))
+	info.add_child(desc)
+
+	var buy := Button.new()
+	buy.custom_minimum_size = Vector2(160, 40)
+	buy.add_theme_font_size_override("font_size", 15)
+	if unlocked:
+		buy.text = "已解锁"
+		buy.disabled = true
+	else:
+		var price := int(u["cost"])
+		buy.text = "解锁 %d XP" % price
+		buy.disabled = int(d["meta_xp"]) < price
+		buy.pressed.connect(func():
+			if MetaSave.purchase_unlock(id):
+				_rebuild_shop(box))
+	cell.add_child(buy)
+	return cell
+
+
 func _close_meta_shop() -> void:
 	if _shop_layer != null:
 		_shop_layer.queue_free()
@@ -480,54 +574,14 @@ func _open_settings() -> void:
 
 
 ## 音量行：名称 + 滑块(0~1) + 百分比。拖动即写档并【实时】应用到音频总线。
+## 2026-10-08：行构建抽到 SettingRows（与战斗内暂停设置共用），此处只做转发。
 func _audio_setting_row(box: VBoxContainer, label_text: String, key: String) -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 16)
-
-	var name_lbl := Label.new()
-	name_lbl.text = label_text
-	name_lbl.add_theme_font_size_override("font_size", 20)
-	name_lbl.custom_minimum_size = Vector2(120, 0)
-	row.add_child(name_lbl)
-
-	var slider := HSlider.new()
-	slider.min_value = 0.0
-	slider.max_value = 1.0
-	slider.step = 0.05
-	slider.value = float(MetaSave.get_setting(key))
-	slider.custom_minimum_size = Vector2(280, 32)
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(slider)
-
-	var pct := Label.new()
-	pct.text = "%d%%" % roundi(slider.value * 100.0)
-	pct.add_theme_font_size_override("font_size", 18)
-	pct.add_theme_color_override("font_color", Color(0.80, 0.84, 0.95))
-	pct.custom_minimum_size = Vector2(60, 0)
-	pct.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(pct)
-
-	# 拖动中只更新缓存（质检 P2-4，2026-09-22）：value_changed 每秒触发几十次，
-	# 旧版每次都「读档+写档」双 IO；现在拖动中缓存实时生效（音量/百分比照常刷新），
-	# 松手（drag_ended）才整档落盘一次。中途闪退最多丢最后一次拖动的值，可接受。
-	slider.value_changed.connect(func(v: float) -> void:
-		MetaSave.set_setting(key, v, false)    # 只更新缓存，不落盘
-		pct.text = "%d%%" % roundi(v * 100.0)
-		GameAudio.apply_volume_settings())     # 实时改总线音量（读缓存）
-	slider.drag_ended.connect(func(_changed: bool) -> void:
-		MetaSave.set_setting(key, slider.value))   # 松手落盘（护栏再过一遍，幂等）
-	box.add_child(row)
+	SettingRows.audio_row(box, label_text, key)
 
 
-## 开关行：带文字的 CheckBox，勾选即写档。
+## 开关行：带文字的 CheckBox，勾选即写档。2026-10-08：转发到 SettingRows（同暂停设置共用）。
 func _toggle_setting_row(box: VBoxContainer, label_text: String, key: String) -> void:
-	var cb := CheckBox.new()
-	cb.text = label_text
-	cb.button_pressed = bool(MetaSave.get_setting(key))
-	cb.add_theme_font_size_override("font_size", 20)
-	cb.toggled.connect(func(on: bool) -> void:
-		MetaSave.set_setting(key, on))
-	box.add_child(cb)
+	SettingRows.toggle_row(box, label_text, key)
 
 
 func _close_settings() -> void:
@@ -544,7 +598,7 @@ var _codex_layer: ColorRect = null
 var _codex_detail: PanelContainer = null
 ## 本次打开时读到的图鉴状态 {id: {"seen": bool, "kills": int}}（13 条只读一次档）。
 var _codex_states: Dictionary = {}
-## 图鉴网格列数：13 只怪 = 4 列 × 4 行，一屏放下，不需要滚动。
+## 图鉴网格列数：14 只怪 = 4 列 × 4 行（末行 2 只），一屏放下，不需要滚动。
 const CODEX_COLUMNS := 4
 ## 格子里的图标显示边长（素材画布是 256×256，等比缩到 64 ⇒ 内容高度约 42~64px）。
 const CODEX_ICON_PX := 64
@@ -740,6 +794,118 @@ func _close_codex() -> void:
 	_codex_states.clear()
 
 
+# ---------------------------------------------------------------- 成就 / 战绩（2026-10-08 玩法增补批次）
+## 成就遮罩层（非 null = 开着）。数据 = MetaSave 账本 + 成就表（只读）——
+## 打开期间数据不可能变（标题画面杀不了怪），一次读档缓存到局部即可。
+var _ach_layer: ColorRect = null
+## 成就网格列数：11 条 = 2 列 × 6 行（高度账：标题 40 + 战绩行 22 + 网格 6×52 + 返回 44
+## + 间距/内边距 ≈ 480px，720 高窗口放得下，不需要滚动）。
+const ACH_COLUMNS := 2
+
+
+func _open_achievements() -> void:
+	if _ach_layer != null:
+		return
+	# 一次读档（achievement_unlocked 每次都走 ledger() 文件 IO —— 11 条 × N 次太浪费）。
+	var d: Dictionary = MetaSave.ledger()
+	var unlocked_arr: Array = d["achievements"]
+	var unlocked := 0
+	for a in MetaSave.ACHIEVEMENTS:
+		if unlocked_arr.has(String(a["id"])):
+			unlocked += 1
+
+	_ach_layer = ColorRect.new()
+	_ach_layer.color = Color(0, 0, 0, 0.66)
+	_ach_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_ach_layer)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_ach_layer.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := _panel_stylebox(26.0)
+	sb.content_margin_top = 14.0
+	sb.content_margin_bottom = 14.0
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+
+	var title := Label.new()
+	title.text = "成就 · %d/%d" % [unlocked, MetaSave.ACHIEVEMENTS.size()]
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", Color("#FFD700"))
+	box.add_child(title)
+
+	# 战绩行：与标题页战绩行同源（同一本账），这里给全量（含胜场/无尽/强化点数）。
+	var stats := Label.new()
+	stats.text = "共 %d 局 · 胜 %d · 累计击杀 %d · 累计金币 %d · 最佳 %d 波 · 无尽最佳 %d 波 · 强化点数 %d" % [
+		int(d["runs"]), int(d["wins"]), int(d["total_kills"]), int(d["total_gold"]),
+		int(d["best_wave"]), int(d["best_endless_wave"]), int(d["meta_xp"])]
+	stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	stats.add_theme_font_size_override("font_size", 15)
+	stats.add_theme_color_override("font_color", Color(0.75, 0.78, 0.88))
+	box.add_child(stats)
+
+	var grid := GridContainer.new()
+	grid.columns = ACH_COLUMNS
+	grid.add_theme_constant_override("h_separation", 14)
+	grid.add_theme_constant_override("v_separation", 6)
+	box.add_child(grid)
+	for a in MetaSave.ACHIEVEMENTS:
+		grid.add_child(_ach_cell(a, unlocked_arr.has(String(a["id"]))))
+
+	var back := Button.new()
+	back.text = "返回（Esc）"
+	back.custom_minimum_size = Vector2(220, 44)
+	back.add_theme_font_size_override("font_size", 17)
+	back.pressed.connect(_close_achievements)
+	box.add_child(back)
+
+
+## 一格成就：名称 + 奖励 XP（已解锁金字/未解锁灰字）+ 描述。done 由调用方传入
+## （批读取档，格内不再碰 MetaSave —— 防 11 次文件 IO）。
+func _ach_cell(a: Dictionary, done: bool) -> Control:
+	var cell := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.15, 0.13, 0.06, 0.9) if done else Color(0.08, 0.09, 0.13, 0.8)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 12.0
+	sb.content_margin_right = 12.0
+	sb.content_margin_top = 8.0
+	sb.content_margin_bottom = 8.0
+	cell.add_theme_stylebox_override("panel", sb)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 2)
+	cell.add_child(v)
+
+	var head := Label.new()
+	head.text = "%s　+%d XP" % [String(a["name"]), int(a["xp"])]
+	head.add_theme_font_size_override("font_size", 17)
+	head.add_theme_color_override("font_color",
+		Color("#FFD700") if done else Color(0.55, 0.58, 0.68))
+	v.add_child(head)
+
+	var desc := Label.new()
+	desc.text = String(a["desc"])
+	desc.add_theme_font_size_override("font_size", 13)
+	desc.add_theme_color_override("font_color",
+		Color(0.82, 0.84, 0.92) if done else Color(0.45, 0.48, 0.56))
+	v.add_child(desc)
+	return cell
+
+
+func _close_achievements() -> void:
+	if _ach_layer != null:
+		_ach_layer.queue_free()
+		_ach_layer = null
+
+
 ## 弹窗面板统一样式（局外强化 / 难度选择 / 设置三处同款：半透明深底 + 描边 + 圆角）。
 func _panel_stylebox(margin: float = 28.0) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
@@ -776,6 +942,18 @@ func _on_start() -> void:
 ## 难度选择遮罩层（非 null = 开着）。点「开始游戏」先选难度，再进选人。
 ## 选择写入 GameSession.difficulty（权威数据源），随后走原选人/开局流程。
 var _diff_layer: ColorRect = null
+## 诅咒选择子层（2026-10-08 第二梯队；由难度层进入；非 null = 开着）。
+var _curse_layer: ColorRect = null
+## 难度层上的「诅咒」入口按钮（文案随勾选实时刷新）。
+var _curse_entry_btn: Button = null
+## 诅咒子层的按钮表（与 _curse_ids 平行；刷新选中/禁用态用）。
+var _curse_btns: Array[Button] = []
+var _curse_ids: Array[String] = []
+## 起始武器子层（2026-10-09 meta 2.0 第二批·武器自由；仅解锁后入口可见）。
+## _weapon_btns[0] = 「默认」，其余与 GameStats.WEAPON_DEFS.keys() 顺序一一对应。
+var _weapon_layer: ColorRect = null
+var _weapon_entry_btn: Button = null
+var _weapon_btns: Array[Button] = []
 
 
 func _open_difficulty_select() -> void:
@@ -834,6 +1012,25 @@ func _open_difficulty_select() -> void:
 	endless_btn.pressed.connect(_pick_endless)
 	box.add_child(endless_btn)
 
+	# 诅咒入口（2026-10-08 第二梯队）：自选难度换成长加速 —— 点开子层勾选，
+	# 选择实时存 GameSession.curses（本层不关闭，返回后文案同步刷新）。
+	_curse_entry_btn = Button.new()
+	_curse_entry_btn.text = _curse_entry_text()
+	_curse_entry_btn.custom_minimum_size = Vector2(420, 62)
+	_curse_entry_btn.add_theme_font_size_override("font_size", 16)
+	_curse_entry_btn.pressed.connect(_open_curse_select)
+	box.add_child(_curse_entry_btn)
+
+	# 起始武器入口（2026-10-09 meta 2.0 第二批·武器自由）：仅解锁后出现 ——
+	# 点开子层单选「默认（角色本命武器）/ 6 把武器任选」，写 GameSession.weapon_pick。
+	if MetaSave.is_meta_unlocked("unlock_weapon_free"):
+		_weapon_entry_btn = Button.new()
+		_weapon_entry_btn.text = _weapon_entry_text()
+		_weapon_entry_btn.custom_minimum_size = Vector2(420, 62)
+		_weapon_entry_btn.add_theme_font_size_override("font_size", 16)
+		_weapon_entry_btn.pressed.connect(_open_weapon_select)
+		box.add_child(_weapon_entry_btn)
+
 	var cancel := Button.new()
 	cancel.text = "取消（Esc）"
 	cancel.custom_minimum_size = Vector2(220, 56)
@@ -847,6 +1044,7 @@ func _pick_difficulty(key: String) -> void:
 		return
 	GameSession.difficulty = key
 	GameSession.endless = false   # 明确走普通/困难：主菜单路径每局重设，无进程内残留
+	GameSession.daily_mode = false   # 每日挑战标记同理：普通路径显式清掉（入口保证互斥）
 	_close_difficulty_select()
 	get_tree().change_scene_to_file(CHARSEL_SCENE)
 
@@ -854,14 +1052,270 @@ func _pick_difficulty(key: String) -> void:
 func _pick_endless() -> void:
 	GameSession.difficulty = "normal"
 	GameSession.endless = true
+	GameSession.daily_mode = false   # 无尽与每日互斥（每日 = 20 波固定种子）
 	_close_difficulty_select()
 	get_tree().change_scene_to_file(CHARSEL_SCENE)
 
 
+## 每日挑战（2026-10-09 meta 2.0 第二批）：固定普通难度 + 当日种子，直接进选人。
+## 种子应用点不在标题侧 —— Battle.start_run → _apply_daily_seed 读 daily_mode 生效，
+## 这里只负责设置模式标记（跨场景保留，begin_run 不碰）。
+func _pick_daily() -> void:
+	GameSession.daily_mode = true
+	GameSession.endless = false
+	GameSession.difficulty = "normal"
+	get_tree().change_scene_to_file(CHARSEL_SCENE)
+
+
 func _close_difficulty_select() -> void:
+	# 防御：诅咒 / 起始武器子层若还开着（异常路径），随难度层一起收掉，避免孤儿遮罩盖住标题。
+	_close_curse_select()
+	_close_weapon_select()
+	_curse_entry_btn = null
+	_weapon_entry_btn = null
 	if _diff_layer != null:
 		_diff_layer.queue_free()
 		_diff_layer = null
+
+
+# ---------------------------------------------------------------- 开局诅咒（2026-10-08 第二梯队）
+## 诅咒选择子层：勾选实时写 GameSession.curses，「完成 / Esc」关闭回难度层。
+## 上限 GameStats.CURSE_MAX 条 —— 满员时未选中的条目自动禁用（刷新函数维护）。
+## 注：不做「通关解锁」门槛 —— 诅咒本身已是自选难度，先让玩家自由使用；
+##     将来要加门槛，在 _open_curse_select 入口处加一个判定即可。
+
+
+## 难度面板上「诅咒」入口按钮的文案：无诅咒时提示可点，有诅咒时列条数与名字。
+func _curse_entry_text() -> String:
+	var n := GameSession.curses.size()
+	if n == 0:
+		return "诅咒：无（自选难度 · 每条强化点数 +%d%%）" % roundi(float(GameStats.CURSE_XP_BONUS) * 100.0)
+	var names: Array[String] = []
+	for id in GameSession.curses:
+		names.append(GameStats.curse_name(String(id)))
+	return "诅咒（%d/%d）：%s" % [n, int(GameStats.CURSE_MAX), " + ".join(names)]
+
+
+func _open_curse_select() -> void:
+	if _curse_layer != null:
+		return
+	_curse_layer = ColorRect.new()
+	_curse_layer.color = Color(0, 0, 0, 0.72)
+	_curse_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_curse_layer)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_curse_layer.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
+	sb.border_color = Color(0.60, 0.36, 0.42)     # 红调边框：与「自虐换成长」语义呼应
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(10)
+	sb.content_margin_left = 34.0
+	sb.content_margin_right = 34.0
+	sb.content_margin_top = 24.0
+	sb.content_margin_bottom = 24.0
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	panel.add_child(box)
+
+	var title := Label.new()
+	title.text = "诅咒（最多 %d 条）" % int(GameStats.CURSE_MAX)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 30)
+	title.add_theme_color_override("font_color", Color("#ff8a80"))
+	box.add_child(title)
+
+	var sub := Label.new()
+	sub.text = "每条：结算强化点数 +%d%%　·　敌人更强，成长更快" % roundi(float(GameStats.CURSE_XP_BONUS) * 100.0)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_font_size_override("font_size", 15)
+	sub.add_theme_color_override("font_color", Color(0.8, 0.8, 0.9))
+	box.add_child(sub)
+
+	_curse_btns.clear()
+	_curse_ids.clear()
+	for id in GameStats.CURSES.keys():
+		var cid := String(id)
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(460, 54)
+		b.add_theme_font_size_override("font_size", 18)
+		# 图标（2026-10-09 美术入库）：左侧 40px 小图标；缺图自动为空、不影响文字与点击。
+		# ⚠️ icon_max_width 是 Button 的【theme 常量】不是属性（直接赋值会运行时错误），
+		# 必须走 add_theme_constant_override。
+		var ic := AssetDB.curse_icon(cid)
+		if ic != null:
+			b.icon = ic
+			b.add_theme_constant_override("icon_max_width", 40)
+		b.pressed.connect(_toggle_curse.bind(cid))
+		box.add_child(b)
+		_curse_btns.append(b)
+		_curse_ids.append(cid)
+
+	var done := Button.new()
+	done.text = "完成（Esc）"
+	done.custom_minimum_size = Vector2(220, 54)
+	done.add_theme_font_size_override("font_size", 16)
+	done.pressed.connect(_close_curse_select)
+	box.add_child(done)
+
+	_refresh_curse_btns()
+
+
+## 勾选 / 取消一条诅咒（满员时只能取消，不能再选 —— 禁用态由刷新函数维护）。
+func _toggle_curse(id: String) -> void:
+	if GameSession.curses.has(id):
+		GameSession.curses.erase(id)
+	elif GameSession.curses.size() < int(GameStats.CURSE_MAX):
+		GameSession.curses.append(id)
+	_refresh_curse_btns()
+
+
+## 刷新诅咒按钮的选中态（金色 + ✓）与禁用态（满员且未选中）。
+func _refresh_curse_btns() -> void:
+	for i in _curse_btns.size():
+		var b := _curse_btns[i]
+		var id := _curse_ids[i]
+		var on: bool = GameSession.curses.has(id)
+		var d: Dictionary = GameStats.CURSES[id]
+		b.text = ("✓ " if on else "　") + "%s：%s" % [String(d["name"]), String(d["desc"])]
+		b.add_theme_color_override("font_color",
+			Color("#FFD24A") if on else Color("#FFE9B0"))
+		b.disabled = (not on) and GameSession.curses.size() >= int(GameStats.CURSE_MAX)
+
+
+func _close_curse_select() -> void:
+	if _curse_layer != null:
+		_curse_layer.queue_free()
+		_curse_layer = null
+	# 难度层的入口按钮文案跟着刷新（它是「上一级」）
+	if _curse_entry_btn != null and is_instance_valid(_curse_entry_btn):
+		_curse_entry_btn.text = _curse_entry_text()
+
+
+# ---------------------------------------------------------------- 起始武器（2026-10-09 meta 2.0 第二批）
+## 武器自由：给任意角色替换起始武器。整条武器线随替换 —— 基础弹道 / 进化形态 /
+## 融合配方全部按替换武器走（数值收口在 Player.weapon_id()，角色特性/属性不受影响）。
+## 入口仅解锁 unlock_weapon_free 后出现在难度层；选择存 GameSession.weapon_pick（跨场景保留）。
+
+
+## 难度层入口按钮文案：默认 = 角色本命武器；已选 = 显示替换武器名。
+func _weapon_entry_text() -> String:
+	var pick := GameSession.weapon_pick
+	if pick == "" or not GameStats.WEAPON_DEFS.has(pick):
+		return "起始武器：默认（角色本命武器）"
+	return "起始武器：%s" % String(GameStats.WEAPON_DEFS[pick]["name"])
+
+
+func _open_weapon_select() -> void:
+	if _weapon_layer != null:
+		return
+	_weapon_layer = ColorRect.new()
+	_weapon_layer.color = Color(0, 0, 0, 0.72)
+	_weapon_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_weapon_layer)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_weapon_layer.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
+	sb.border_color = Color(0.42, 0.56, 0.72)     # 蓝调边框：与「武器 / 装备」语义呼应
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(10)
+	sb.content_margin_left = 34.0
+	sb.content_margin_right = 34.0
+	sb.content_margin_top = 24.0
+	sb.content_margin_bottom = 24.0
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+
+	var title := Label.new()
+	title.text = "起始武器（武器自由）"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 30)
+	title.add_theme_color_override("font_color", Color("#8ecbff"))
+	box.add_child(title)
+
+	var sub := Label.new()
+	sub.text = "任意角色可用任意武器 —— 进化形态与融合配方跟随替换武器"
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_font_size_override("font_size", 15)
+	sub.add_theme_color_override("font_color", Color(0.8, 0.8, 0.9))
+	box.add_child(sub)
+
+	_weapon_btns.clear()
+	var def_btn := Button.new()
+	def_btn.custom_minimum_size = Vector2(560, 48)
+	def_btn.add_theme_font_size_override("font_size", 16)
+	def_btn.pressed.connect(_pick_weapon.bind(""))
+	box.add_child(def_btn)
+	_weapon_btns.append(def_btn)
+	for id in GameStats.WEAPON_DEFS.keys():
+		var wid := String(id)
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(560, 48)
+		b.add_theme_font_size_override("font_size", 16)
+		b.pressed.connect(_pick_weapon.bind(wid))
+		box.add_child(b)
+		_weapon_btns.append(b)
+
+	var done := Button.new()
+	done.text = "完成（Esc）"
+	done.custom_minimum_size = Vector2(220, 54)
+	done.add_theme_font_size_override("font_size", 16)
+	done.pressed.connect(_close_weapon_select)
+	box.add_child(done)
+
+	_refresh_weapon_btns()
+
+
+## 单选：空串 = 恢复默认（角色本命武器）。
+func _pick_weapon(id: String) -> void:
+	GameSession.weapon_pick = id if GameStats.WEAPON_DEFS.has(id) else ""
+	_refresh_weapon_btns()
+
+
+## 刷新选中态（金色 + ✓）。单选语义 —— 无禁用态。
+func _refresh_weapon_btns() -> void:
+	var pick := GameSession.weapon_pick
+	if not GameStats.WEAPON_DEFS.has(pick):
+		pick = ""
+	var ids: Array = GameStats.WEAPON_DEFS.keys()
+	for i in _weapon_btns.size():
+		var b := _weapon_btns[i]
+		var on: bool
+		if i == 0:
+			on = pick == ""
+			b.text = ("✓ " if on else "　") + "默认 · 角色本命武器"
+		else:
+			var wid := String(ids[i - 1])
+			on = wid == pick
+			b.text = ("✓ " if on else "　") + "%s　（%s）" % [
+				String(GameStats.WEAPON_DEFS[wid]["name"]), GameStats.weapon_summary(wid)]
+		b.add_theme_color_override("font_color",
+			Color("#FFD24A") if on else Color("#DCE6F5"))
+
+
+func _close_weapon_select() -> void:
+	if _weapon_layer != null:
+		_weapon_layer.queue_free()
+		_weapon_layer = null
+	# 难度层的入口按钮文案跟着刷新（它是「上一级」）
+	if _weapon_entry_btn != null and is_instance_valid(_weapon_entry_btn):
+		_weapon_entry_btn.text = _weapon_entry_text()
 
 
 ## 键盘/手柄也能进（Enter 或空格）。商店/难度层开着时改为关闭对应弹层，杜绝误触开始。
@@ -883,6 +1337,26 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _codex_layer != null:
 		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 			_close_codex()
+			get_viewport().set_input_as_handled()
+		return
+	# 成就 / 战绩（2026-10-08）：与图鉴同款 —— 只认 Esc。
+	if _ach_layer != null:
+		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+			_close_achievements()
+			get_viewport().set_input_as_handled()
+		return
+	# 诅咒子层（2026-10-08 第二梯队）：优先于难度层关闭（它是难度层的子层）。
+	if _curse_layer != null:
+		if event.is_action_pressed("pause") or (event is InputEventKey and event.pressed \
+				and event.keycode == KEY_ESCAPE):
+			_close_curse_select()
+			get_viewport().set_input_as_handled()
+		return
+	# 起始武器子层（2026-10-09 meta 2.0 第二批）：与诅咒子层同层级。
+	if _weapon_layer != null:
+		if event.is_action_pressed("pause") or (event is InputEventKey and event.pressed \
+				and event.keycode == KEY_ESCAPE):
+			_close_weapon_select()
 			get_viewport().set_input_as_handled()
 		return
 	if _diff_layer != null:

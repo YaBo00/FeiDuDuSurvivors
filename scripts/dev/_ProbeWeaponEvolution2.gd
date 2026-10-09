@@ -364,24 +364,37 @@ func _test_proj_spread(p: Node2D) -> void:
 		_check(_approx(ang5[4] - ang5[0], spread),
 			"J1c: 5 条总扇面 = %.2f（旧行为）" % spread)
 
-	# J2 超界压缩：8 条 → 间隔 = MAX_PROJ_SPREAD/7，总扇面仍封顶
+	# J2 超界压缩（2026-09-21 二改口径，2026-10-09 批量测修复断言）：
+	# 「中央弹道恒定」+ 新增弹道成对 ±k·step 交替展开；偶数 shots 分母 = shots
+	# （单侧最大 k = shots/2，对称设想总宽 = shots×step = spread；落单侧多一档）。
+	# 旧断言按二改前的「单调递增、极差 = spread」写，未随二改更新（首跑假红）。
 	var ang8 := _fire_and_angles(p, 8)
 	_check(ang8.size() == 8, "J2a: proj=8 发射 8 条（无上限生效，实际 %d）" % ang8.size())
 	if ang8.size() == 8:
-		var want8 := spread / 7.0
-		_check(_approx(ang8[1] - ang8[0], want8),
-			"J2b: 8 条间隔压缩为 %.4f（实际 %.4f）" % [want8, ang8[1] - ang8[0]])
-		_check(_approx(ang8[7] - ang8[0], spread),
-			"J2c: 8 条总扇面仍封顶 %.2f（未再变宽）" % spread)
+		var s8 := spread / 8.0
+		var exp8: Array[float] = [-3.0 * s8, -2.0 * s8, -s8, 0.0, s8, 2.0 * s8, 3.0 * s8, 4.0 * s8]
+		var ok8 := true
+		for i in 8:
+			if absf(ang8[i] - exp8[i]) > 1e-4:
+				ok8 = false
+		_check(ok8, "J2b: 8 条角度集合 == {0,±1..±3,+4}×%.4f（实际 %s）" % [s8, str(ang8)])
+		_check(ang8[7] - ang8[0] <= spread + 1e-4,
+			"J2c: 8 条总扇面 ≤ 封顶 %.2f（实际 %.4f）" % [spread, ang8[7] - ang8[0]])
 
-	# J3 更多：12 条按 11 份继续压缩
+	# J3 更多：12 条（偶数）分母 = 12，集合 {0,±1..±5,+6} × spread/12
 	var ang12 := _fire_and_angles(p, 12)
 	_check(ang12.size() == 12, "J3a: proj=12 发射 12 条（实际 %d）" % ang12.size())
 	if ang12.size() == 12:
-		_check(_approx(ang12[11] - ang12[0], spread),
-			"J3b: 12 条总扇面仍 %.2f" % spread)
-		_check(_approx(ang12[1] - ang12[0], spread / 11.0),
-			"J3c: 12 条间隔 %.4f" % (spread / 11.0))
+		var s12 := spread / 12.0
+		var exp12: Array[float] = [-5.0 * s12, -4.0 * s12, -3.0 * s12, -2.0 * s12, -s12, 0.0,
+			s12, 2.0 * s12, 3.0 * s12, 4.0 * s12, 5.0 * s12, 6.0 * s12]
+		var ok12 := true
+		for i in 12:
+			if absf(ang12[i] - exp12[i]) > 1e-4:
+				ok12 = false
+		_check(ok12, "J3b: 12 条角度集合 == {0,±1..±5,+6}×%.4f（实际 %s）" % [s12, str(ang12)])
+		_check(ang12[11] - ang12[0] <= spread + 1e-4,
+			"J3c: 12 条总扇面 ≤ 封顶 %.2f（实际 %.4f）" % [spread, ang12[11] - ang12[0]])
 
 	# J4 去钳制：旧上限 5 不再是天花板
 	var pv = p

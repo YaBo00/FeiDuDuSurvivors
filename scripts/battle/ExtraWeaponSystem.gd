@@ -41,6 +41,15 @@ var _missiles: Array[Dictionary] = []
 ## 触发次数统计 {weapon_id: int}（自检 / 探针观测用；也是「副武器真的在工作」的自证）
 var triggers: Dictionary = {}
 
+# ---- 武器融合（2026-10-08 第二梯队）----
+## 融合飞刃（环刃连奏 / 旋风连拳）：每项 = {node, pos, vel, left, hits}
+## hits = 本刃已命中敌表（每片对每个敌人只结算一次，穿透语义）。
+var _fusion_blades: Array[Dictionary] = []
+## 「环刃连奏」甩刃节流计时（秒）。
+var _fusion_blade_cd := 0.0
+## 「旋风连拳」开火计数（每 FUSION_WHIRL_EVERY 次甩一圈）。
+var _fusion_fired := 0
+
 
 func setup(battle: Node) -> void:
 	_b = battle
@@ -60,7 +69,12 @@ func grant(id: String) -> bool:
 	if owned_count() >= GameStats.extra_weapon_cap():
 		return false
 	_levels[id] = 1
-	_cd[id] = 0.0     # 立刻开始工作（验收：选了「获得」后立刻生效，不等一个冷却）
+	if id != "orbit":
+		# 立刻开始工作（验收：选了「获得」后立刻生效，不等一个冷却）。
+		# orbit 是持续旋转型、无冷却 —— 不进 _cd 表（2026-10-09 批量测修正：
+		# 旧版对全部 id 无条件写键，与「_cd 里没有 orbit」的 C8 契约冲突）；
+		# grant 里 orbit 的「立刻生效」由 _sync_blades() 承载。
+		_cd[id] = 0.0
 	_sync_blades()
 	return true
 
@@ -119,6 +133,14 @@ func reset() -> void:
 		if is_instance_valid(mn):
 			mn.queue_free()
 	_missiles.clear()
+	# 融合飞刃与节流态（2026-10-08 第二梯队）：重开一局不留残留。
+	for bd in _fusion_blades:
+		var bn: Node2D = bd["node"]
+		if is_instance_valid(bn):
+			bn.queue_free()
+	_fusion_blades.clear()
+	_fusion_blade_cd = 0.0
+	_fusion_fired = 0
 
 
 # ================================================================ 主推进
@@ -130,6 +152,10 @@ func update(delta: float) -> void:
 	if not p.is_alive():
 		return   # 玩家已死：副武器停手（与主角武器一致 —— 死后不再输出）
 	for id in _levels.keys():
+		# orbit 无冷却、不进 _cd 表（2026-10-09 批量测修正：不跳过的话这一行会给
+		# orbit 重建键 —— 值恒 0、无功能意义，但违反「_cd 只装周期武器」的契约）。
+		if String(id) == "orbit":
+			continue
 		_cd[id] = maxf(0.0, float(_cd.get(id, 0.0)) - delta)
 	_tick_orbit(delta)
 	for id in _levels.keys():
@@ -161,6 +187,10 @@ func update(delta: float) -> void:
 				_cast_missile(p, t)
 	_tick_pools(delta)
 	_tick_missiles(delta)
+	# 融合（2026-10-08 第二梯队）：节流递减 + 飞刃推进。
+	# 与 pools/missiles 同级 —— 玩家死后不推进（update 开头的 is_alive 守卫已拦）。
+	_fusion_blade_cd = maxf(0.0, _fusion_blade_cd - delta)
+	_tick_fusion_blades(delta)
 
 
 # ================================================================ 环绕飞刃（持续型）
@@ -283,21 +313,29 @@ func _cast_ice_nova(p: Player, t: Dictionary) -> void:
 ## 在玩家脚下留一滩毒（场上最多 MAX_ACID_POOLS 滩，超出顶掉最旧的一滩）。
 func _cast_acid(p: Player, t: Dictionary) -> void:
 	triggers["acid"] = int(triggers.get("acid", 0)) + 1
+	_spawn_acid_pool_at(p.global_position, float(t["radius"]), float(t["dps_mul"]),
+		float(t["vuln"]), float(t["life"]), int(_levels["acid"]) - 1)
+
+
+## 在某位置生成一滩毒（上限护栏 + 视觉 + 数据登记）。
+## 副武器毒云与融合「剧毒薯泥」共用 —— 两处口径（tick 伤害 / Boss 无关 / 淡出）自动一致。
+func _spawn_acid_pool_at(pos: Vector2, radius: float, dps_mul: float, vuln: float,
+		life: float, vlevel: int) -> void:
 	if _pools.size() >= GameStats.MAX_ACID_POOLS:
 		var old: Dictionary = _pools.pop_front()
 		var on: Node2D = old["node"]
 		if is_instance_valid(on):
 			on.queue_free()
 	var fx := AcidPoolFX.new()
-	fx.radius = float(t["radius"])
-	fx.life = float(t["life"])
-	fx.life_max = fx.life   # 质检 P1-1：毒池逐级寿命 2.0/2.5/3.0，不同步会让 Lv2+ 全程不透明、末 2s 才淡出
+	fx.radius = radius
+	fx.life = life
+	fx.life_max = fx.life   # 质检 P1-1：池子寿命与淡出基准必须同步
 	fx.tint = GameStats.EXTRA_WEAPON_DEFS["acid"]["color"]
-	fx.vlevel = int(_levels["acid"]) - 1   # 每级可见锚点：气泡数 + 浓度
-	_add_fx(fx, p.global_position)
+	fx.vlevel = vlevel      # 每级可见锚点：气泡数 + 浓度
+	_add_fx(fx, pos)
 	_pools.append({
-		"node": fx, "radius": float(t["radius"]), "dps": float(t["dps_mul"]),
-		"vuln": float(t["vuln"]), "left": float(t["life"]), "tick_t": GameStats.EXTRA_ACID_TICK,
+		"node": fx, "radius": radius, "dps": dps_mul,
+		"vuln": vuln, "left": life, "tick_t": GameStats.EXTRA_ACID_TICK,
 	})
 
 
@@ -310,12 +348,18 @@ func _tick_pools(delta: float) -> void:
 	var tint: Color = GameStats.EXTRA_WEAPON_DEFS["acid"]["color"]
 	var remain: Array[Dictionary] = []
 	for pd in _pools:
-		var node: Node2D = pd["node"]
+		# ⚠️ 不能直接 `var node: Node2D = pd["node"]`：AcidPoolFX 的 _process 会自行
+		# queue_free（双重寿命），已释放的引用赋给类型化变量会报「previously freed
+		# instance」并【中止整个函数】⇒ 死引用永远清不出 _pools、每帧刷屏（2026-10-09
+		# 批量测踩过）。先以 Variant 读取做有效性判定，再落类型。
+		var node_v: Variant = pd["node"]
 		pd["left"] = float(pd["left"]) - delta
-		if float(pd["left"]) <= 0.0 or not is_instance_valid(node):
-			if is_instance_valid(node):
-				node.queue_free()
+		if float(pd["left"]) <= 0.0 or not is_instance_valid(node_v):
+			if is_instance_valid(node_v):
+				var dn: Node2D = node_v
+				dn.queue_free()
 			continue
+		var node: Node2D = node_v
 		var tick := float(pd["tick_t"]) - delta
 		var center: Vector2 = node.global_position
 		var radius := float(pd["radius"])
@@ -430,6 +474,155 @@ func _explode(pos: Vector2, blast: float, dmg: int, tint: Color) -> void:
 		var en: Enemy = e
 		if en.global_position.distance_to(pos) <= blast + en.radius:
 			_hit(en, dmg, tint, false)
+
+
+# ================================================================ 武器融合（2026-10-08 第二梯队）
+## 主武器 × 副武器 6 配方：状态（fusion_id）住 Player，效果执行在这里。
+## 四个钩子由 CombatResolver / Battle 在对应事件点调用 —— 未融合角色每个钩子只是一次
+## 字符串比较（零开销、零随机消耗 ⇒ 自检/平衡/探针进程随机流逐位不漂）。
+##
+## 各配方的触发点：
+##   basic    环刃连奏 → fusion_on_fired（开火；0.6s 节流）
+##   kangaroo 旋风连拳 → fusion_on_fired（开火；每 5 次一圈）
+##   study    落笔惊雷 → fusion_on_hit（主武器直接命中；25%）
+##   sad      寒心冰封 → fusion_on_hit（主武器直接命中；100% 刷新式）
+##   finance  钞能导弹 → fusion_on_kill（击杀；20%）
+##   potato   剧毒薯泥 → fusion_on_splash（爆裂溅射；35%）
+
+## 融合 id（读 Player 状态；"" = 未融合）。
+func _fusion_id() -> String:
+	if _b == null or _b.player == null:
+		return ""
+	return String(_b.player.fusion_id)
+
+
+## 开火钩子（CombatResolver.on_player_fired 尾部调用）。
+func fusion_on_fired(aim_pos: Vector2) -> void:
+	match _fusion_id():
+		"basic":
+			# 环刃连奏：向瞄准方向左右各偏 FUSION_BLADE_SIDE_DEG 甩一片飞刃。
+			if _fusion_blade_cd > 0.0:
+				return
+			_fusion_blade_cd = GameStats.FUSION_BLADE_CD
+			var p: Player = _b.player
+			var base_ang: float = (aim_pos - p.global_position).angle()
+			var side := deg_to_rad(GameStats.FUSION_BLADE_SIDE_DEG)
+			_fling_blade(p.global_position, base_ang - side)
+			_fling_blade(p.global_position, base_ang + side)
+		"kangaroo":
+			# 旋风连拳：每 FUSION_WHIRL_EVERY 次开火，360° 均分甩一圈飞刃。
+			_fusion_fired += 1
+			if _fusion_fired % GameStats.FUSION_WHIRL_EVERY != 0:
+				return
+			var p2: Player = _b.player
+			var n := GameStats.FUSION_WHIRL_COUNT
+			for i in n:
+				_fling_blade(p2.global_position, TAU * float(i) / float(n))
+
+
+## 命中钩子（process_projectiles 直接命中结算后调用；溅射命中不触发）。
+func fusion_on_hit(e: Enemy) -> void:
+	var fid := _fusion_id()
+	if fid == "study":
+		# 落笔惊雷：按概率在该敌人处劈雷（视觉与副武器闪电同款，vlevel=0 基准粗细）。
+		if randf() < GameStats.FUSION_THUNDER_CHANCE:
+			_strike_lightning(e, _base_damage(GameStats.FUSION_THUNDER_DMG_MUL),
+				GameStats.EXTRA_WEAPON_DEFS["lightning"]["color"], 0)
+	elif fid == "sad":
+		# 寒心冰封：命中即触发（100%），对同敌刷新式续杯；Boss 折扣在 apply_slow 内部收口。
+		e.apply_slow(GameStats.FUSION_SLOW_MUL, GameStats.FUSION_SLOW_DUR)
+
+
+## 击杀钩子（CombatResolver.cleanup_enemies 击杀处调用）。
+func fusion_on_kill(pos: Vector2) -> void:
+	if _fusion_id() != "finance":
+		return
+	if randf() >= GameStats.FUSION_MISSILE_CHANCE:
+		return
+	_launch_fusion_missile(pos)
+
+
+## 溅射钩子（process_projectiles 溅射命中点调用）。
+func fusion_on_splash(pos: Vector2) -> void:
+	if _fusion_id() != "potato":
+		return
+	if randf() >= GameStats.FUSION_POOL_CHANCE:
+		return
+	_spawn_acid_pool_at(pos, GameStats.FUSION_POOL_RADIUS,
+		GameStats.FUSION_POOL_DPS_MUL, 1.0, GameStats.FUSION_POOL_LIFE, 0)
+
+
+## 甩出一片融合飞刃：直线飞行 + 逐敌单次结算（穿透语义，与环绕飞刃同判定口径）。
+## 场上飞刃满 MAX_FUSION_BLADES 时本次静默放弃（性能护栏）。
+func _fling_blade(pos: Vector2, ang: float) -> void:
+	if _fusion_blades.size() >= GameStats.MAX_FUSION_BLADES:
+		return
+	var node := BladeFX.new()
+	node.tint = GameStats.EXTRA_WEAPON_DEFS["orbit"]["color"]
+	node.tex = AssetDB.extra_weapon_tex("orbit")
+	_add_fx(node, pos)
+	node.rotation = ang
+	_fusion_blades.append({
+		"node": node, "pos": pos,
+		"vel": Vector2(cos(ang), sin(ang)) * GameStats.FUSION_BLADE_SPEED,
+		"left": GameStats.FUSION_BLADE_LIFE, "hits": {},
+	})
+
+
+## 融合飞刃推进：直线飞行 → 命中判定（每片对每个敌人只算一次）→ 寿命到收回。
+func _tick_fusion_blades(delta: float) -> void:
+	if _fusion_blades.is_empty():
+		return
+	var dmg := _base_damage(GameStats.FUSION_BLADE_DMG_MUL)
+	var tint: Color = GameStats.EXTRA_WEAPON_DEFS["orbit"]["color"]
+	var remain: Array[Dictionary] = []
+	for bd in _fusion_blades:
+		var node: Node2D = bd["node"]
+		if not is_instance_valid(node):
+			continue
+		var pos: Vector2 = bd["pos"] + (bd["vel"] as Vector2) * delta
+		var hits: Dictionary = bd["hits"]
+		node.global_position = pos
+		node.rotation = (bd["vel"] as Vector2).angle()   # 刀尖朝飞行方向（BladeFX 画在 +X）
+		for e in _alive_enemies():
+			var en: Enemy = e
+			if hits.has(en.get_instance_id()):
+				continue
+			if pos.distance_to(en.global_position) > en.radius + GameStats.FUSION_BLADE_RADIUS:
+				continue
+			hits[en.get_instance_id()] = true
+			_hit(en, dmg, tint, false)
+		bd["pos"] = pos
+		bd["left"] = float(bd["left"]) - delta
+		if float(bd["left"]) <= 0.0:
+			if is_instance_valid(node):
+				node.queue_free()
+			continue
+		remain.append(bd)
+	_fusion_blades = remain
+
+
+## 融合「钞能导弹」：从击杀点射出一枚追踪导弹（复用副武器导弹的飞行/爆炸链路，
+## 共享 MAX_MISSILES 护栏与 _tick_missiles 推进）。
+func _launch_fusion_missile(pos: Vector2) -> void:
+	if _missiles.size() >= GameStats.MAX_MISSILES:
+		return
+	var target := _nearest_enemy_of(pos, 1e9, {})
+	var node := MissileFX.new()
+	node.tex = AssetDB.extra_weapon_tex("missile")
+	node.tint = GameStats.EXTRA_WEAPON_DEFS["missile"]["color"]
+	node.vlevel = 0
+	_add_fx(node, pos)
+	var ang := 0.0
+	if target != null:
+		ang = (target.global_position - pos).angle()
+	node.rotation = ang + PI * 0.5
+	_missiles.append({
+		"node": node, "pos": pos,
+		"vel": Vector2(cos(ang), sin(ang)) * GameStats.MISSILE_SPEED,
+		"target": target, "dmg": _base_damage(GameStats.FUSION_MISSILE_DMG_MUL),
+		"blast": GameStats.FUSION_MISSILE_BLAST, "left": GameStats.MISSILE_LIFE,
+	})
 
 
 # ================================================================ 工具

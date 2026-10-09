@@ -491,6 +491,10 @@ func _sec_c_visual_anchors() -> void:
 		_prep()
 		var wid := String(c["id"])
 		_check(battle.extra.grant(wid), "grant(%s)" % wid)
+		# 闪电必须场上有目标才会劈（_cast_lightning 无目标直接 return，不生成 FX）——
+		# 其余三把不依赖目标，但统一都放一只站桩目标：四把口径一致，导弹也有归向。
+		# 血厚（_spawn 内 hp=100000）不会被一击清掉；下一轮 _prep() 随重开清场。
+		_spawn("Ox", battle.player.global_position + Vector2(160.0, 0.0))
 		for lv in range(1, 6):
 			_free_fx()
 			battle.extra._pools.clear()
@@ -733,7 +737,11 @@ func _sec_e_cards() -> void:
 	for c in c1:
 		if String(c["id"]) == "w_orbit_lvl":
 			lvl_card = c
-	_check(not lvl_card.is_empty() and String(lvl_card["display"]).contains("2 把"),
+	# 卡面文案必须取「升到的那一级」（Lv2）的参数 —— 与 extra_weapon_card_text(wid, 2) 全等。
+	# ⚠️ 别写死具体数值：orbit 刀数曲线 2026-09-21 #10 已改（2/2/3/3/4 → 2/3/5/8/12），
+	# 「2 把」这类旧快照值会假失败；一律现取。
+	var l2_txt := GameStats.extra_weapon_card_text("orbit", 2)
+	_check(not lvl_card.is_empty() and String(lvl_card["display"]) == l2_txt,
 		"升级卡文案显示升到 Lv2 的实际参数（%s）" % String(lvl_card.get("display", "无")))
 	for i in 4:
 		battle.extra.level_up("orbit")

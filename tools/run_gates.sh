@@ -124,6 +124,45 @@ echo "[32/32] enemy codex - order table / reachable via pools-elites-boss / reco
 "$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeCodex.gd > "$P/_g32_last.txt" 2>&1
 pass $?
 
+echo "[33/33] active items - table / equip+cooldown(cdr) / nuke kills-no-drop + boss 25% / rush / time stop / aura / HUD slot / low-hp / reroll / coupon salvage"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29][30][31][32]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeActiveItems.gd > "$P/_g33_last.txt" 2>&1
+pass $?
+
+echo "[34/34] in-run events - altar / black market / challenge pillar / mimic chest (trigger loop / rewards / wave-end cleanup / spawn guard)"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29][30][31][32][33]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeEvents.gd > "$P/_g34_last.txt" 2>&1
+pass $?
+
+echo "[35/35] starting curses - table / bonus pure fn / five muls (hp dmg spd spawn gold) / xp_mul on record_run"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29][30][31][32][33][34]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeCurses.gd > "$P/_g35_last.txt" 2>&1
+pass $?
+
+echo "[36/36] weapon fusion - 6 recipes / card gate (evolved+max extra) / 6 effects (blade combo whirl thunder freeze missile pool) / discipline"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27][28][29][30][31][32][33][34][35]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeFusions.gd > "$P/_g36_last.txt" 2>&1
+pass $?
+echo "[37/37] boss phases - table(2/3) / threshold advance one-step / iframe absorb+recover / speed-dmg field muls / interval+summon consumers / sub-boss wave15 / selftest switch"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27]-[36]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeBossPhases.gd > "$P/_g37_last.txt" 2>&1
+pass $?
+echo "[38/38] endless 2.0 - rules table(5) / era boundaries / rule rotation+defaults / spawn+hp+dmg+spd+loot+elite muls / milestone gold+chest / none-endless+switch guards"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27]-[37]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeEndless2.gd > "$P/_g38_last.txt" 2>&1
+pass $?
+echo "[39/39] meta 2.0 unlocks - table(2) / purchase atomic+dedupe+unknown-reject / dirty-save filter / session snapshot probe guard / dual active slots (select/cd/use/hud/reset) / weapon cap+override / zero-rand"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27]-[38]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeMetaUnlocks.gd > "$P/_g39_last.txt" 2>&1
+pass $?
+echo "[40/40] meta 2.0b - weapon free (weapon_id 3-state / swap chain / fusion key / projectile) / daily seed (pure fn / guard / same-seed-same-stream) / daily record cross-day / HUD+result / zero-rand"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27]-[39]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeMeta2b.gd > "$P/_g40_last.txt" 2>&1
+pass $?
+echo "[41/41] maps - 5 map table / guard(probe off) / layouts(parametric+corners) / rebuild chain / 4 effects(end-to-end) / zero-rand"
+# 用退出码判定（quit(0/1)）—— stdout 尾行偶发缓冲截断会让 grep 误报（同 [9][27]-[40]）
+"$GC" --headless --path "$P_WIN" --script res://scripts/dev/_ProbeMaps.gd > "$P/_g41_last.txt" 2>&1
+pass $?
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部门禁 PASS"; else echo "有门禁未通过"; fi
 exit "$FAIL"

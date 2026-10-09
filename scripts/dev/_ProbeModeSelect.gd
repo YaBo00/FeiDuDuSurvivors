@@ -39,7 +39,22 @@ func _run() -> void:
 	_check(true, "模式弹窗已打开")
 	var btns: Array = []
 	_collect_buttons(layer, btns)
-	_check(btns.size() == 4, "弹窗含 4 个按钮：普通/困难/无尽/取消（实际 %d）" % btns.size())
+	# 弹窗构成（2026-10-09 批量测口径更新）：
+	#   核心 4 = 普通 / 困难 / 无尽模式 / 取消（2026-09-20 版）
+	#   +1 诅咒入口（2026-10-08 第二梯队，常驻）
+	#   +1 起始武器入口（2026-10-09 meta 2.0b，仅 unlock_weapon_free 解锁后出现 ——
+	#      期望总数必须跟随 MetaSave 状态推导，不能写死）
+	var got_lab: Array[String] = []
+	for b in btns:
+		got_lab.append(String(b.text))
+	var missing: Array[String] = []
+	for w in ["普通", "困难", "无尽模式", "取消（Esc）"]:
+		if not got_lab.has(String(w)):
+			missing.append(String(w))
+	var want_n := 5 + (1 if MetaSave.is_meta_unlocked("unlock_weapon_free") else 0)
+	_check(btns.size() == want_n and missing.is_empty(),
+		"弹窗按钮构成齐全（核心 4 + 诅咒入口 + 可选武器入口）：期望 %d 个 / 实际 %d 个，缺失 %s" % [
+			want_n, btns.size(), str(missing)])
 	for b in btns:
 		var txt := String(b.text)
 		_check(not txt.contains("\n"),

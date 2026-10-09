@@ -31,6 +31,8 @@ var _prices: Array[int] = []
 var _sold: Array[bool] = []
 var _on_close: Callable = Callable()
 var _gold := 0
+## 「离开」按钮（2026-10-08 黑市）：文案随 mode 切换（离开商店 / 离开黑市）。
+var _leave_btn: Button = null
 
 ## 自检/观测模式：显示后自动离开商店
 var _auto := false
@@ -85,17 +87,17 @@ func _ready() -> void:
 		row.add_child(card)
 		_cards.append(card)
 
-	var leave := Button.new()
-	leave.text = "离开商店"
-	leave.custom_minimum_size = Vector2(240, 60)
-	leave.add_theme_font_size_override("font_size", 24)
-	leave.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	leave.offset_top = -120.0
-	leave.offset_bottom = -60.0
-	leave.offset_left = -120.0
-	leave.offset_right = 120.0
-	leave.pressed.connect(_leave)
-	_root.add_child(leave)
+	_leave_btn = Button.new()
+	_leave_btn.text = "离开商店"
+	_leave_btn.custom_minimum_size = Vector2(240, 60)
+	_leave_btn.add_theme_font_size_override("font_size", 24)
+	_leave_btn.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_leave_btn.offset_top = -120.0
+	_leave_btn.offset_bottom = -60.0
+	_leave_btn.offset_left = -120.0
+	_leave_btn.offset_right = 120.0
+	_leave_btn.pressed.connect(_leave)
+	_root.add_child(_leave_btn)
 
 
 func _make_label(y: float, size: float, color: Color) -> Label:
@@ -163,26 +165,42 @@ func _make_card() -> Button:
 
 ## 打开商店。会随机抽 SHOP_SLOTS 件商品。
 ## owned：本局已购道具（A4 前置解锁链）——默认 null = 不启用前置过滤（旧行为）。
+## rarity_luck（2026-10-08 幸运护符）：稀有度权重加成，透传给 GameStats.shop_roll；
+## 默认 0.0 = 旧分布（旧调用方/探针零影响）。
+## mode（2026-10-08 局内事件系统）："wave"（默认，波末商店，旧行为逐位不变）/
+## "black_market"（黑市：池子 rare+、价格 ×1.3、文案换皮）—— 卡片/购买/关闭链路完全共用。
 func open(wave_num: int, gold: int, discount: float, on_close: Callable,
-		auto_close: bool = false, owned: Variant = null, mastery_level: int = -1) -> void:
-	_ids = GameStats.shop_roll(GameStats.SHOP_SLOTS, owned, mastery_level)
+		auto_close: bool = false, owned: Variant = null, mastery_level: int = -1,
+		rarity_luck: float = 0.0, mode: String = "wave") -> void:
+	var black := mode == "black_market"
+	if black:
+		_ids = GameStats.black_market_roll(GameStats.BLACK_MARKET_SLOTS, rarity_luck)
+	else:
+		_ids = GameStats.shop_roll(GameStats.SHOP_SLOTS, owned, mastery_level, rarity_luck)
+	var price_mul: float = float(GameStats.BLACK_MARKET_PRICE_MUL) if black else 1.0
 	_prices.clear()
 	_sold.clear()
 	for id in _ids:
-		_prices.append(GameStats.shop_price(id, discount))
+		_prices.append(maxi(1, roundi(float(GameStats.shop_price(id, discount)) * price_mul)))
 		_sold.append(false)
 	_on_close = on_close
 	_auto = auto_close
 	_auto_timer = AUTO_CLOSE_DELAY
-	_hint.text = "第 %d 波结束 · 买点装备再上路（%d 件商品）" % [wave_num, _ids.size()]
+	if black:
+		_hint.text = "黑市 · 一锤子买卖（%d 件好货，贵是贵了点）" % _ids.size()
+	else:
+		_hint.text = "第 %d 波结束 · 买点装备再上路（%d 件商品）" % [wave_num, _ids.size()]
+	if _leave_btn != null:
+		_leave_btn.text = "离开黑市" if black else "离开商店"
 	refresh(gold)
 	visible = true
 
 
 ## 刷新商品（「刷新」道具，2026-09-20 商店扩充）：整批重抽 SHOP_SLOTS 件、
 ## 重置售出状态与价格（沿用当前折扣与前置链）。已扣的钱不退；金币显示由调用方随后 refresh。
-func reroll(discount: float, owned: Variant = null, mastery_level: int = -1) -> void:
-	_ids = GameStats.shop_roll(GameStats.SHOP_SLOTS, owned, mastery_level)
+func reroll(discount: float, owned: Variant = null, mastery_level: int = -1,
+		rarity_luck: float = 0.0) -> void:
+	_ids = GameStats.shop_roll(GameStats.SHOP_SLOTS, owned, mastery_level, rarity_luck)
 	_prices.clear()
 	_sold.clear()
 	for id in _ids:

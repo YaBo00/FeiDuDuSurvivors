@@ -447,18 +447,17 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 ## 武器摘要行。全部从 GameStats.WEAPON_DEFS 推导 —— 改表即生效，这里不硬编码任何武器。
+## 武器自由（2026-10-09 meta 2.0 第二批）：替换生效时显示替换武器 + 来源标注
+## （谁在用 / 用了什么，在选人界面必须一眼可辨）。
 func _weapon_line(id: String) -> String:
-	var w: Dictionary = GameStats.weapon_for_char(id)
-	var pierce := int(w["pierce"])
-	# pierce 99 是「贯穿全屏」的实现值，直接显示数字会让人以为要穿 99 个
-	var pierce_txt := "贯穿" if pierce >= 90 else "%d" % pierce
-	var parts: Array[String] = [
-		"单次 %d 发" % int(w["base_shots"]),
-		"伤害 ×%.2f" % float(w["dmg_mul"]),
-		"穿透 %s" % pierce_txt,
-	]
-	if float(w["lifesteal"]) > 0.0:
-		parts.append("吸血 %d%%" % roundi(float(w["lifesteal"]) * 100.0))
-	if float(w["gold_on_hit"]) > 0.0:
-		parts.append("命中 %d%% 掉金币" % roundi(float(w["gold_on_hit"]) * 100.0))
-	return "武器 · %s（%s）" % [String(w["name"]), " · ".join(parts)]
+	var wid := id
+	var replaced := false
+	var pick := GameSession.weapon_pick
+	if pick != "" and GameStats.WEAPON_DEFS.has(pick):
+		wid = pick
+		replaced = true
+	var w: Dictionary = GameStats.weapon_for_char(wid)
+	var line := "武器 · %s（%s）" % [String(w["name"]), GameStats.weapon_summary(wid)]
+	if replaced:
+		line += "　※ 武器自由替换"
+	return line
