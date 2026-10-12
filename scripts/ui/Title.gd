@@ -316,16 +316,8 @@ func _open_meta_shop() -> void:
 	_shop_layer.add_child(center)
 
 	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.42, 0.46, 0.68)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = 28.0
-	sb.content_margin_right = 28.0
-	sb.content_margin_top = 22.0
-	sb.content_margin_bottom = 22.0
-	panel.add_theme_stylebox_override("panel", sb)
+	# 2026-10-12 面板皮肤统一收口（原为内联 StyleBoxFlat）。
+	UiTheme.apply_panel(panel)
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()
@@ -907,17 +899,22 @@ func _close_achievements() -> void:
 
 
 ## 弹窗面板统一样式（局外强化 / 难度选择 / 设置三处同款：半透明深底 + 描边 + 圆角）。
-func _panel_stylebox(margin: float = 28.0) -> StyleBoxFlat:
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.42, 0.46, 0.68)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = margin
-	sb.content_margin_right = margin
-	sb.content_margin_top = 22.0
-	sb.content_margin_bottom = 22.0
-	return sb
+## 2026-10-12 起改为委托 UiTheme 统一收口（贴图九宫格面板），margin 仅覆盖横向内容边距。
+func _panel_stylebox(margin: float = 28.0) -> StyleBox:
+	var base := UiTheme.panel_stylebox()
+	if base is StyleBoxTexture:
+		var copy := (base as StyleBoxTexture).duplicate() as StyleBoxTexture
+		if margin > 0.0:
+			copy.content_margin_left = margin
+			copy.content_margin_right = margin
+		return copy
+	# 贴图缺失 → UiTheme 已回退到 StyleBoxFlat；覆盖其内容边距后返回
+	if base is StyleBoxFlat:
+		var fb := (base as StyleBoxFlat).duplicate() as StyleBoxFlat
+		fb.content_margin_left = margin
+		fb.content_margin_right = margin
+		return fb
+	return base
 
 
 func _spacer(h: int) -> Control:
@@ -969,16 +966,8 @@ func _open_difficulty_select() -> void:
 	_diff_layer.add_child(center)
 
 	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.42, 0.46, 0.68)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = 34.0
-	sb.content_margin_right = 34.0
-	sb.content_margin_top = 24.0
-	sb.content_margin_bottom = 24.0
-	panel.add_theme_stylebox_override("panel", sb)
+	# 2026-10-12 面板皮肤统一收口（原为内联 StyleBoxFlat，34px 边距）。
+	UiTheme.apply_panel(panel)
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()
@@ -1109,16 +1098,8 @@ func _open_curse_select() -> void:
 	_curse_layer.add_child(center)
 
 	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.60, 0.36, 0.42)     # 红调边框：与「自虐换成长」语义呼应
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = 34.0
-	sb.content_margin_right = 34.0
-	sb.content_margin_top = 24.0
-	sb.content_margin_bottom = 24.0
-	panel.add_theme_stylebox_override("panel", sb)
+	# 2026-10-12 面板皮肤统一收口：curse 变体自带红调边框（原为内联 border_color 红调）。
+	UiTheme.apply_panel(panel, "curse")
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()
@@ -1226,16 +1207,8 @@ func _open_weapon_select() -> void:
 	_weapon_layer.add_child(center)
 
 	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.42, 0.56, 0.72)     # 蓝调边框：与「武器 / 装备」语义呼应
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = 34.0
-	sb.content_margin_right = 34.0
-	sb.content_margin_top = 24.0
-	sb.content_margin_bottom = 24.0
-	panel.add_theme_stylebox_override("panel", sb)
+	# 2026-10-12 面板皮肤统一收口：weapon 变体自带蓝调边框（原为内联 border_color 蓝调）。
+	UiTheme.apply_panel(panel, "weapon")
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()

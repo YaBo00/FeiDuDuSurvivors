@@ -83,6 +83,8 @@ func _build() -> void:
 	left.position = Vector2(36, 90)
 	left.size = Vector2(THUMB_COLS * (THUMB + 14.0) + 30.0, 470.0)
 	left.mouse_filter = Control.MOUSE_FILTER_STOP
+	# 2026-10-12 补：此前未设皮肤，用 Godot 默认灰面板，与整体风格断层。
+	UiTheme.apply_panel(left)
 	add_child(left)
 
 	var grid := GridContainer.new()
@@ -320,16 +322,8 @@ func _open_recharge(id: String) -> void:
 	_pay_layer.add_child(center)
 
 	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.42, 0.46, 0.68)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = 30.0
-	sb.content_margin_right = 30.0
-	sb.content_margin_top = 22.0
-	sb.content_margin_bottom = 22.0
-	panel.add_theme_stylebox_override("panel", sb)
+	# 2026-10-12 面板皮肤统一收口（原为内联 StyleBoxFlat，同款参数散落 7 处）。
+	UiTheme.apply_panel(panel)
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()

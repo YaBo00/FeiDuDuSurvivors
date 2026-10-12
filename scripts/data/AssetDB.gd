@@ -377,6 +377,7 @@ const ENDLESS_ICONS := {
 
 const UI := {
 	"slot_empty": "ui/slot_empty.png",
+	"slot_owned": "ui/slot_owned.png",
 	"joystick_base": "ui/joystick_base.png",
 	"joystick_knob": "ui/joystick_knob.png",
 	"card_frame": "ui/card_frame.png",
@@ -385,6 +386,15 @@ const UI := {
 	"button_normal": "ui/button_normal.png",
 	"button_hover": "ui/button_hover.png",
 	"button_pressed": "ui/button_pressed.png",
+	"button_disabled": "ui/button_disabled.png",
+	## 2026-10-12 全套 UI 皮肤（docs/review/make_ui_skin.py 程序化生成）。
+	"panel": "ui/panel.png",
+	"panel_curse": "ui/panel_curse.png",
+	"panel_weapon": "ui/panel_weapon.png",
+	"slider_bg": "ui/slider_bg.png",
+	"slider_grabber": "ui/slider_grabber.png",
+	"check_off": "ui/check_off.png",
+	"check_on": "ui/check_on.png",
 }
 
 const BG := {
@@ -450,6 +460,17 @@ const EXPECT := {
 	"ui/button_normal.png": {"size": Vector2i(384, 128), "alpha": true},
 	"ui/button_hover.png": {"size": Vector2i(384, 128), "alpha": true},
 	"ui/button_pressed.png": {"size": Vector2i(384, 128), "alpha": true},
+	"ui/button_disabled.png": {"size": Vector2i(384, 128), "alpha": true},
+	# 全套 UI 皮肤（2026-10-12）：面板 / 滑块 / 勾选框。MARGIN 见 UiTheme.gd。
+	"ui/panel.png": {"size": Vector2i(256, 256), "alpha": true},
+	"ui/panel_curse.png": {"size": Vector2i(256, 256), "alpha": true},
+	"ui/panel_weapon.png": {"size": Vector2i(256, 256), "alpha": true},
+	"ui/slider_bg.png": {"size": Vector2i(256, 24), "alpha": true},
+	"ui/slider_grabber.png": {"size": Vector2i(40, 40), "alpha": true},
+	"ui/check_off.png": {"size": Vector2i(40, 40), "alpha": true},
+	"ui/check_on.png": {"size": Vector2i(40, 40), "alpha": true},
+	"ui/slot_owned.png": {"size": Vector2i(96, 96), "alpha": true},
+	"ui/slot_empty.png": {"size": Vector2i(96, 96), "alpha": true},
 	# 虚拟摇杆（批次四 4a）：实测 128x128（PNG 头读取），与 ui/ 前缀规则同值，显式声明以自证
 	"ui/joystick_base.png": {"size": Vector2i(128, 128), "alpha": true},
 	"ui/joystick_knob.png": {"size": Vector2i(128, 128), "alpha": true},

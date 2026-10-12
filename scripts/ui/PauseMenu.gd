@@ -141,16 +141,16 @@ func _open_sub(title_text: String, margin: float = 28.0) -> VBoxContainer:
 	_sub_layer.add_child(center)
 
 	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.10, 0.11, 0.16, 0.97)
-	sb.border_color = Color(0.42, 0.46, 0.68)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = margin
-	sb.content_margin_right = margin
-	sb.content_margin_top = 20.0
-	sb.content_margin_bottom = 20.0
-	panel.add_theme_stylebox_override("panel", sb)
+	# 2026-10-12 面板皮肤统一收口（原为内联 StyleBoxFlat，同款参数散落 7 处）。
+	# margin 参数保留用于横向内容边距覆盖，纵向沿用皮肤默认。
+	var psb := UiTheme.panel_stylebox()
+	if psb != null and margin > 0.0 and psb is StyleBoxTexture:
+		var copy := (psb as StyleBoxTexture).duplicate() as StyleBoxTexture
+		copy.content_margin_left = margin
+		copy.content_margin_right = margin
+		panel.add_theme_stylebox_override("panel", copy)
+	else:
+		UiTheme.apply_panel(panel)
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()
